@@ -38,3 +38,4 @@ class RefreshToken(Base):
     ip_address: Mapped[str | None] = mapped_column(INET)
 
     user_agent: Mapped[str | None] = mapped_column(Text)
+    
