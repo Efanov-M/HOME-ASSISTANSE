@@ -89,10 +89,5 @@ class FamilyRepository:
         family = Family(name=name)
 
         self.db.add(family)
-        self.db.commit()
-        # ``refresh`` - это один из тех маленьких, но важных ORM-моментов:
-        # после commit мы просим SQLAlchemy заново подтянуть данные из базы,
-        # например сгенерированный первичный ключ.
-        self.db.refresh(family)
-
+       
         return family

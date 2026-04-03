@@ -44,3 +44,5 @@ class PasswordResetToken(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
+
+

@@ -72,8 +72,7 @@ class AuditLogRepository:
         )
 
         self.db.add(audit_log)
-        self.db.commit()
-        self.db.refresh(audit_log)
+       
 
         return audit_log
 

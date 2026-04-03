@@ -89,34 +89,35 @@ class UserRepository:
         role: UserRole,
         family_id: int,
     ) -> User:
-        """EN: Create a new user, commit it, and return the saved ORM object.
+        """EN: Create a new user instance and add it to the current session.
 
-        The method prepares a ``User`` instance, adds it to the session,
-        commits the transaction, and then refreshes the object from the database.
+    The method prepares a ``User`` instance and adds it to the session.
+    The transaction is NOT committed here — this must be handled at the service layer.
 
-        Args:
-            email: User email.
-            password_hash: Already prepared password hash, not a raw password.
-            role: Role value from ``UserRole`` enum.
-            family_id: Identifier of the family this user belongs to.
+    Args:
+        email: User email.
+        password_hash: Already prepared password hash, not a raw password.
+        role: Role value from ``UserRole`` enum.
+        family_id: Identifier of the family this user belongs to.
 
-        Returns:
-            Saved ``User`` ORM object.
+    Returns:
+        New ``User`` ORM object added to the session (not yet committed).
 
-        RU: Создаёт нового пользователя, делает commit и возвращает сохранённый ORM-объект.
+    RU: Создаёт нового пользователя и добавляет его в текущую сессию.
 
-        Метод собирает экземпляр ``User``, добавляет его в сессию,
-        фиксирует транзакцию, а затем обновляет объект данными из базы.
+        Метод создаёт экземпляр ``User`` и добавляет его в сессию.
+        Фиксация транзакции (commit) здесь НЕ выполняется — это ответственность сервисного слоя.
 
-        Аргументы:
-            email: email пользователя.
-            password_hash: уже подготовленный хеш пароля, а не сырой пароль.
-            role: значение роли из enum ``UserRole``.
-            family_id: идентификатор семьи, к которой относится пользователь.
+    Аргументы:
+        email: email пользователя.
+        password_hash: уже подготовленный хеш пароля, а не сырой пароль.
+        role: значение роли из enum ``UserRole``.
+        family_id: идентификатор семьи, к которой относится пользователь.
 
-        Возвращает:
-            Сохранённый ORM-объект ``User``.
-        """
+    Возвращает:
+        Новый ORM-объект ``User``, добавленный в сессию (ещё не сохранён в БД).
+    """
+        
 
         user = User(
             email=email,
@@ -127,9 +128,64 @@ class UserRepository:
         )
 
         self.db.add(user)
-        self.db.commit()
-        # ``commit`` фиксирует транзакцию, но именно ``refresh`` помогает
-        # объекту в памяти Python догнать итоговое состояние записи в базе.
-        self.db.refresh(user)
-
         return user
+
+    def update_user_password(self, user_id: int, password_hash: str) -> User | None:
+        """EN: Update the password hash for an existing user.
+
+        Args:
+            user_id: Identifier of the user whose password should be changed.
+            password_hash: New prepared password hash.
+
+        Returns:
+            Updated ``User`` object or ``None`` if the user does not exist.
+
+        RU: Обновляет хеш пароля существующего пользователя.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чей пароль нужно изменить.
+            password_hash: новый подготовленный хеш пароля.
+
+        Возвращает:
+            Обновлённый объект ``User`` или ``None``, если пользователь не найден.
+        """
+
+        user = self.get_user_by_id(user_id)
+
+        if not user:
+            return None
+    
+        user.password_hash = password_hash
+        
+        return user
+    
+    def set_user_active_status(self, user_id: int, status: bool) -> User | None:
+        """EN: Change the active status flag for a user.
+
+        Args:
+            user_id: Identifier of the user to update.
+            status: New boolean value for ``is_active``.
+
+        Returns:
+            Updated ``User`` object or ``None`` if the user does not exist.
+
+        RU: Меняет признак активности пользователя.
+
+        Аргументы:
+            user_id: идентификатор пользователя для обновления.
+            status: новое булево значение для поля ``is_active``.
+
+        Возвращает:
+            Обновлённый объект ``User`` или ``None``, если пользователь не найден.
+        """
+
+        user = self.get_user_by_id(user_id)
+
+        if not user:
+            return None
+        
+        user.is_active = status
+        return user
+
+
+

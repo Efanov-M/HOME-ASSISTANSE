@@ -1,9 +1,41 @@
 import os
 from dotenv import load_dotenv
-import secrets
 
 load_dotenv()
 
 
+# === CORE SETTINGS ===
 
-secret_key = secrets.token_urlsafe(32)
+SECRET_KEY = os.getenv("SECRET_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+# === TOKEN SETTINGS ===
+
+ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
+REFRESH_TOKEN_EXPIRE_DAYS = os.getenv("REFRESH_TOKEN_EXPIRE_DAYS")
+RESET_TOKEN_EXPIRE_MINUTES  = os.getenv('RESET_TOKEN_EXPIRE_MINUTES')
+
+
+# === VALIDATION ===
+
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY is not set")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set")
+
+if not ACCESS_TOKEN_EXPIRE_MINUTES:
+    raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES is not set")
+
+if not REFRESH_TOKEN_EXPIRE_DAYS:
+    raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS is not set")
+if not RESET_TOKEN_EXPIRE_MINUTES:
+    raise ValueError("RESET_TOKEN_EXPIRE_MINUTES is not set")
+
+
+# === TYPE CASTING ===
+
+ACCESS_TOKEN_EXPIRE_MINUTES = int(ACCESS_TOKEN_EXPIRE_MINUTES)
+REFRESH_TOKEN_EXPIRE_DAYS = int(REFRESH_TOKEN_EXPIRE_DAYS)
+RESET_TOKEN_EXPIRE_MINUTES = int(RESET_TOKEN_EXPIRE_MINUTES)

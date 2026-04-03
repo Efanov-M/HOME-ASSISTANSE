@@ -95,8 +95,7 @@ class PasswordResetTokenRepository:
         )
 
         self.db.add(password_reset_token)
-        self.db.commit()
-        self.db.refresh(password_reset_token)
+        
 
         return password_reset_token
 
@@ -164,8 +163,5 @@ class PasswordResetTokenRepository:
         # сначала меняется ORM-объект в памяти,
         # и только после ``commit`` это изменение становится постоянным в БД.
         token.used_at = datetime.now()
-
-        self.db.commit()
-        self.db.refresh(token)
 
         return token

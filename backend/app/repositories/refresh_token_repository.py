@@ -78,6 +78,7 @@ class RefreshTokenRepository:
             .filter(RefreshToken.token_hash == token)
             .first()
         )
+   
     def create_refresh_token(
         self,
         user_id: int,
@@ -120,43 +121,34 @@ class RefreshTokenRepository:
         )
 
         self.db.add(refresh_token)
-        self.db.commit()
-        self.db.refresh(refresh_token)
+        
 
         return refresh_token
 
 
-    def revoke_refresh_token(self, token_hash: str):
-        """EN: Mark a refresh token as revoked and return the updated row.
+    def revoke_refresh_token(self, token_object: RefreshToken) -> RefreshToken:
+        """EN: Mark an existing refresh token as revoked.
+
+        The method does NOT perform any lookup or validation.
+        It only updates the given ORM object.
 
         Args:
-            token_hash: Hashed refresh token value that should be revoked.
+            token_object: Existing RefreshToken ORM object.
 
         Returns:
-            Updated ``RefreshToken`` ORM object.
+            Updated RefreshToken object.
 
-        Raises:
-            ValueError: If the token does not exist or is already revoked.
+        RU: Помечает переданный refresh token как отозванный.
 
-        RU: Помечает refresh token как отозванный и возвращает обновлённую запись.
+        Метод НЕ выполняет поиск и проверки.
+        Он только изменяет уже полученный ORM-объект.
 
         Аргументы:
-            token_hash: хеш refresh token, который нужно отозвать.
+            token_object: ORM-объект RefreshToken.
 
         Возвращает:
-            Обновлённый ORM-объект ``RefreshToken``.
-
-        Исключения:
-            ValueError: Если токен не существует или уже отозван.
+            Обновлённый объект RefreshToken.
         """
 
-        data = self.db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
-        if not data:
-            raise ValueError ('Токена не существует')
-        
-        if data.revoked_at:
-            raise ValueError ('Токен отозван')
-        data.revoked_at = datetime.now(timezone.utc)
-        self.db.commit()
-        self.db.refresh(data)
-        return data
+        token_object.revoked_at = datetime.now(timezone.utc)
+        return token_object

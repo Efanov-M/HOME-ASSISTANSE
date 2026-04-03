@@ -1,0 +1,4434 @@
+# Project Directory Structure:
+.
+├── .gptree_config
+├── README.md
+├── Technical Specification_1.md
+├── Technical Specification_2.md
+├── Technical Specification_scheme.md
+├── backend/
+│   ├── Dockerfile
+│   ├── app/
+│   │   ├── api/
+│   │   ├── core/
+│   │   │   ├── database.py
+│   │   │   └── security.py
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── audit_log.py
+│   │   │   ├── family.py
+│   │   │   ├── password_reset_token.py
+│   │   │   ├── refresh_token.py
+│   │   │   └── user.py
+│   │   ├── modules/
+│   │   ├── repositories/
+│   │   │   ├── audit_log_repository.py
+│   │   │   ├── family_repository.py
+│   │   │   ├── password_reset_repository.py
+│   │   │   ├── refresh_token_repository.py
+│   │   │   └── user_repository.py
+│   │   └── services/
+│   │       └── auth_service.py
+│   └── requirements.txt
+├── config.py
+├── docker/
+│   ├── docker-compose.yml
+│   └── init/
+├── roadmap.md
+├── storage/
+│   └── uploads/
+└── Папка обучения/
+    ├── 1.md
+    ├── 2.md
+    └── 3.md
+
+# BEGIN FILE CONTENTS
+
+# File: backend/app/services/auth_service.py
+
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta, timezone
+
+from app.models.user import User, UserRole
+from app.models.family import Family
+from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.family_repository import FamilyRepository
+from app.repositories.user_repository import UserRepository
+from app.repositories.refresh_token_repository import RefreshTokenRepository
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    get_password_hash,
+    hash_token,
+    verify_password,
+)
+
+
+
+
+def validate_email(email: str) -> str:
+    """
+    Validate and normalize an email address.
+
+    The function:
+    1. strips leading and trailing whitespace,
+    2. converts the email to lowercase,
+    3. checks that there is exactly one '@',
+    4. checks that local and domain parts are not empty,
+    5. checks that the domain contains a dot,
+    6. checks that the domain does not start or end with a dot.
+
+    Args:
+        email: Raw email string.
+
+    Returns:
+        Normalized email string.
+
+    Raises:
+        ValueError: If the email format is invalid.
+    """
+    email = email.strip().lower()
+
+    if not email:
+        raise ValueError("Неверный формат email")
+
+    if email.count("@") != 1:
+        raise ValueError("Неверный формат email")
+
+    local_part, domain_part = email.split("@")
+
+    if not local_part or not domain_part:
+        raise ValueError("Неверный формат email")
+
+    if "." not in domain_part:
+        raise ValueError("Неверный формат email")
+
+    if domain_part.startswith(".") or domain_part.endswith("."):
+        raise ValueError("Неверный формат email")
+
+    return email
+
+def validate_data(data:str):
+    """EN: Normalize a generic text value and ensure it is not empty.
+
+    Args:
+        data: Raw string value received from input.
+
+    Returns:
+        Trimmed and lowercased string.
+
+    Raises:
+        ValueError: If the resulting value is empty.
+
+    RU: Нормализует текстовое значение и проверяет, что оно не пустое.
+
+    Аргументы:
+        data: сырое строковое значение, пришедшее на вход.
+
+    Возвращает:
+        Строку без внешних пробелов и в нижнем регистре.
+
+    Исключения:
+        ValueError: Если после нормализации значение оказалось пустым.
+    """
+
+    data = data.strip().lower()
+    if not data:
+        raise ValueError ('Значение не должно быть пустым')
+    return data 
+
+def register_family(db, name: str):
+    """EN: Register a new family if a family with the same name does not exist.
+
+    Args:
+        db: Active database session.
+        name: Family name to be created.
+
+    Returns:
+        Newly created ``Family`` ORM object.
+
+    Raises:
+        ValueError: If a family with the same name already exists.
+
+    RU: Регистрирует новую семью, если семья с таким именем ещё не существует.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        name: имя семьи, которую нужно создать.
+
+    Возвращает:
+        Новый ORM-объект ``Family``.
+
+    Исключения:
+        ValueError: Если семья с таким именем уже существует.
+    """
+
+    family_repository = FamilyRepository(db)
+
+    existing_family = family_repository.get_family_by_name(name)
+
+    if existing_family is not None:
+        raise ValueError("Семья с таким именем уже существует")
+
+    new_family = family_repository.create_family(name)
+
+    return new_family
+        
+
+def register_user(db, email: str, password: str, family_name: str ):
+    """EN: Register a user and either join or create a family.
+
+    The function validates input, checks email uniqueness,
+    decides whether the family already exists,
+    and assigns ``admin`` or ``user`` role accordingly.
+
+    Args:
+        db: Active database session.
+        email: Raw user email.
+        password: Raw user password before hashing.
+        family_name: Name of the family to join or create.
+
+    Returns:
+        Newly created ``User`` ORM object.
+
+    Raises:
+        ValueError: If the email is already used or validation fails.
+
+    RU: Регистрирует пользователя и либо присоединяет его к семье, либо создаёт новую.
+
+    Функция валидирует входные данные, проверяет уникальность email,
+    определяет, существует ли уже семья,
+    и в зависимости от этого назначает роль ``admin`` или ``user``.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        email: сырой email пользователя.
+        password: сырой пароль пользователя до хеширования.
+        family_name: имя семьи, к которой нужно присоединиться или которую нужно создать.
+
+    Возвращает:
+        Новый ORM-объект ``User``.
+
+    Исключения:
+        ValueError: Если email уже занят или входные данные не проходят проверку.
+    """
+
+    family_repository = FamilyRepository(db)
+    user_repository = UserRepository(db)
+    # Проверяем email на валидацию
+    email = validate_email(email)
+    family_name = validate_data(family_name)
+    # проверяем есть ли пользователь в системе 
+    existing_user = user_repository.get_user_by_email(email)
+    if existing_user is not None:
+        raise ValueError("Пользователь с таким email уже существует")
+    
+    password_hash = get_password_hash(password) # функция из будущего
+    # проверяем есть ли семья с данным name. Если есть то пользователь создается 
+    # с ролью user, если нет то admin
+    existing_family = family_repository.get_family_by_name(family_name)
+    if existing_family is None:
+        new_family = family_repository.create_family(family_name)
+        family_id = new_family.id
+        role = UserRole.admin
+    else:
+        role = UserRole.user
+        family_id = existing_family.id
+    new_user = user_repository.create_user(email, password_hash, role, family_id) 
+    
+    return new_user
+
+
+
+
+def login_user(db, email: str,password: str, ip_address: str, user_agent: str):
+    """EN: Authenticate a user, create tokens, and write audit events.
+
+    Args:
+        db: Active database session.
+        email: Email used for login.
+        password: Raw password to verify.
+        ip_address: Client IP address for audit and token storage.
+        user_agent: Client user-agent string for audit and token storage.
+
+    Returns:
+        Dictionary containing ``access_token`` and ``refresh_token``.
+
+    Raises:
+        ValueError: If the user is missing, blocked, or provides a wrong password.
+
+    RU: Аутентифицирует пользователя, создаёт токены и пишет события в аудит.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        email: email для входа в систему.
+        password: сырой пароль для проверки.
+        ip_address: IP-адрес клиента для аудита и хранения токена.
+        user_agent: строка User-Agent клиента для аудита и хранения токена.
+
+    Возвращает:
+        Словарь с ключами ``access_token`` и ``refresh_token``.
+
+    Исключения:
+        ValueError: Если пользователь не найден, заблокирован или ввёл неверный пароль.
+    """
+
+   # 2. инициализируем репозитории
+    user_repository = UserRepository(db)
+    audit_repository = AuditLogRepository(db)
+    refresh_token_repository = RefreshTokenRepository(db)
+
+    #   3. ищем пользователя
+    existing_user = user_repository.get_user_by_email(email)
+
+    # 4. если пользователь не найден — логируем и падаем
+    if existing_user is None:
+        audit_repository.create_audit_log(
+            user_id=None,
+            event_type="login_failed_user_not_found",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+        )
+        raise ValueError("Пользователь с таким email не существует")
+
+    # 5. проверяем активность
+    if not existing_user.is_active:
+        audit_repository.create_audit_log(
+            user_id=existing_user.id,
+            event_type="login_failed_user_blocked",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+    )
+        raise ValueError("Пользователь заблокирован")
+
+    # 6. проверяем пароль
+    if not verify_password(password, existing_user.password_hash):
+        audit_repository.create_audit_log(
+            user_id=existing_user.id,
+            event_type="login_failed_wrong_password",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+        )
+        raise ValueError("Неверный пароль")
+
+    # 7. создаём access token (JWT)
+    access_token = create_access_token(existing_user.id, existing_user.role)
+
+    # 8. создаём refresh token (raw строка)
+    refresh_token = create_refresh_token()
+
+    # 9. делаем hash refresh token (для БД)
+    refresh_token_hash = hash_token(refresh_token)
+
+    # 10. считаем срок жизни refresh token
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+
+    # 11. сохраняем refresh token (в виде hash) в БД
+    refresh_token_repository.create_refresh_token(
+        existing_user.id,
+        refresh_token_hash,
+        expires_at,
+        ip_address,
+        user_agent
+    )
+
+    # 12. логируем успешный вход
+    audit_repository.create_audit_log(
+        user_id=existing_user.id,
+        event_type="login_success",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details={"email": email}
+    )
+
+    # 13. возвращаем токены клиенту
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token
+    }
+
+
+def refresh_access_token(db, refresh_token):
+    """EN: Validate a refresh token and issue a new access token.
+
+    Args:
+        db: Active database session.
+        refresh_token: Raw refresh token received from the client.
+
+    Returns:
+        Newly created access token string.
+
+    Raises:
+        ValueError: If the refresh token is missing, expired, revoked,
+            or belongs to an inactive user.
+
+    RU: Проверяет refresh token и выпускает новый access token.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        refresh_token: сырой refresh token, полученный от клиента.
+
+    Возвращает:
+        Новый access token в виде строки.
+
+    Исключения:
+        ValueError: Если refresh token не найден, истёк, отозван
+            или принадлежит неактивному пользователю.
+    """
+
+    # подключаемся к бд
+    audit_repository = AuditLogRepository(db)
+    refresh_token_db = RefreshTokenRepository(db)
+    user_repository = UserRepository(db)
+
+    # получаем хэш токена
+    refresh_token_hash = hash_token(refresh_token)
+    # по хэшу смотрим наличии записи в бд
+    res = refresh_token_db.get_refresh_token_by_token_hash(refresh_token_hash)
+    # если записи нет то ошибка
+    if not res:
+        audit_repository.create_audit_log(
+            user_id=None,
+            event_type="refresh_failed_token_not_found",
+            ip_address=None,
+            user_agent=None,
+            details={"email": None}
+        )
+
+        raise ValueError ('Токен не существует')
+    # запись есть, получаем пользователя для ведения логов
+    user = user_repository.get_user_by_id(res.user_id)
+    user_id = user.id
+    email = user.email
+    ip = res.ip_address
+    us_agent = res.user_agent
+    # проверяем истек ли срок у токена или нет 
+    if datetime.now(timezone.utc) > res.expires_at:
+        audit_repository.create_audit_log(
+            user_id=user_id,
+            event_type="refresh_failed_token_expired",
+            ip_address=ip,
+            user_agent=us_agent,
+            details={"email": email}
+        )
+        raise ValueError ("У токена истек срок действия")
+    # проверяем не был ли отозван токкен
+    if res.revoked_at is not None:
+        audit_repository.create_audit_log(
+            user_id=res.id,
+            event_type="refresh_failed_token_revoked",
+            ip_address=res.ip_address,
+            user_agent=res.user_agent,
+            details={"email": email}
+        )
+        raise ValueError (" Токен был отозван ")
+    #
+    if not user.is_active:
+        audit_repository.create_audit_log(
+            user_id=res.id,
+            event_type="refresh_failed_user_blocked",
+            ip_address=res.ip_address,
+            user_agent=res.user_agent,
+            details={"email": email}
+        )
+        raise ValueError (" Пользователь не активен ")
+    
+    access_token = create_access_token(user_id, user.role)
+    audit_repository.create_audit_log(
+            user_id=res.id,
+            event_type="refresh_failed_user_blocked",
+            ip_address=res.ip_address,
+            user_agent=res.user_agent,
+            details={"email": email}
+        )
+
+    return access_token
+
+
+    
+
+        
+
+
+# END FILE CONTENTS
+
+
+# File: backend/Dockerfile
+
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/2.md
+
+Хорошо. Тогда начинаем вместе, так же спокойно и подробно.
+Сейчас делаем только user_repository.py и только две операции:
+
+ 1. get_user_by_email
+ 2. create_user
+
+Без JWT, без API, без сервисов. Только слой работы с БД.
+
+⸻
+
+Что такое repository
+
+Сначала короткая теория.
+
+Repository — это слой доступа к данным
+
+Он нужен, чтобы не писать SQL и работу с сессией прямо в endpoint или service.
+
+То есть repository отвечает на вопросы вроде:
+ • найди пользователя по email
+ • создай пользователя
+ • обнови пароль
+ • сохрани refresh token
+
+⸻
+
+Почему нельзя писать это сразу в API
+
+Если ты начнёшь делать так:
+ • endpoint принял запрос
+ • там же открыл сессию
+ • там же сделал запрос в БД
+ • там же создал пользователя
+ • там же сделал commit
+
+то получится каша.
+
+⸻
+
+Правильное разделение
+
+API -> Service -> Repository -> DB
+
+API
+
+принимает HTTP-запрос
+
+Service
+
+решает бизнес-логику
+
+Repository
+
+идёт в базу
+
+DB
+
+хранит данные
+
+⸻
+
+Что мы делаем сейчас
+
+Путь файла:
+
+backend/app/repositories/user_repository.py
+
+⸻
+
+Что будет в этом файле
+
+На первом шаге там будут:
+ • импорт Session
+ • импорт модели User
+ • класс UserRepository
+ • метод get_user_by_email
+ • метод create_user
+
+⸻
+
+Сразу готовый каркас
+
+Скопируй это, а потом я разберу построчно.
+
+from sqlalchemy.orm import Session
+
+from app.models.user import User, UserRole
+
+class UserRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_user_by_email(self, email: str) -> User | None:
+        return self.db.query(User).filter(User.email == email).first()
+
+    def create_user(
+        self,
+        email: str,
+        password_hash: str,
+        role: UserRole,
+        family_id: int,
+    ) -> User:
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            role=role,
+            is_active=True,
+            family_id=family_id,
+        )
+
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+
+        return user
+
+⸻
+
+Теперь подробный разбор
+
+⸻
+
+1. Импорт Session
+
+from sqlalchemy.orm import Session
+
+Что это такое
+
+Session — это объект, через который SQLAlchemy работает с базой.
+
+Через него ты можешь:
+ • делать запросы
+ • добавлять записи
+ • удалять записи
+ • коммитить изменения
+
+⸻
+
+1. Импорт модели User
+
+from app.models.user import User, UserRole
+
+Почему импортируем User
+
+Потому что repository будет работать именно с таблицей users, представленной как ORM-модель User.
+
+Почему импортируем UserRole
+
+Потому что при создании пользователя поле role должно получать значение enum-типа.
+
+⸻
+
+Класс UserRepository
+
+class UserRepository:
+
+Это обычный Python-класс.
+
+Зачем он нужен
+
+Чтобы сгруппировать операции, связанные с пользователями, в одном месте.
+
+⸻
+
+Конструктор __init__
+
+def __init__(self, db: Session):
+    self.db = db
+
+⸻
+
+Что это значит
+
+Когда ты создаёшь объект repository, ты передаёшь ему сессию БД.
+
+Пример будущего использования:
+
+repo = UserRepository(db)
+
+Здесь:
+ • db — это объект Session
+ • self.db — мы сохраняем его внутри repository
+
+⸻
+
+Почему это удобно
+
+Потом в каждом методе ты можешь писать:
+
+self.db.query(...)
+self.db.add(...)
+self.db.commit()
+
+и не передавать db каждый раз вручную в каждую строчку.
+
+⸻
+
+Метод get_user_by_email
+
+def get_user_by_email(self, email: str) -> User | None:
+    return self.db.query(User).filter(User.email == email).first()
+
+Разбираем очень подробно.
+
+⸻
+
+1. Заголовок метода
+
+def get_user_by_email(self, email: str) -> User | None:
+
+Что значит email: str
+
+Метод принимает email как строку.
+
+Что значит -> User | None
+
+Метод возвращает:
+ • либо объект User
+ • либо None, если пользователь не найден
+
+⸻
+
+1. Запрос
+
+self.db.query(User)
+
+Это означает:
+
+начать запрос к таблице users через ORM-модель User
+
+⸻
+
+1. Фильтр
+
+.filter(User.email == email)
+
+Это означает:
+
+найти строку, где колонка email равна переданному значению
+
+⸻
+
+1. .first()
+
+.first()
+
+Это означает:
+
+вернуть первую найденную запись
+если ничего нет — вернуть None
+
+⸻
+
+Как это выглядит мысленно
+
+Если в таблице есть:
+
+id=1, email='<test@mail.com>'
+
+и ты вызываешь:
+
+repo.get_user_by_email("<test@mail.com>")
+
+то получишь объект User.
+
+Если вызываешь:
+
+repo.get_user_by_email("<unknown@mail.com>")
+
+то получишь None.
+
+⸻
+
+Метод create_user
+
+def create_user(
+    self,
+    email: str,
+    password_hash: str,
+    role: UserRole,
+    family_id: int,
+) -> User:
+
+⸻
+
+Что принимает метод
+ • email
+ • password_hash
+ • role
+ • family_id
+
+⸻
+
+Почему здесь password_hash, а не password
+
+Потому что repository не должен заниматься хешированием.
+
+Это очень важный архитектурный принцип
+
+Repository работает с данными,
+а не решает бизнес-логику безопасности.
+
+То есть:
+ • service хеширует пароль
+ • repository сохраняет уже готовый hash
+
+⸻
+
+Создание объекта User
+
+user = User(
+    email=email,
+    password_hash=password_hash,
+    role=role,
+    is_active=True,
+    family_id=family_id,
+)
+
+⸻
+
+Что происходит
+
+Мы создаём Python-объект ORM-модели User.
+
+Пока это ещё не “запись в базе”.
+Пока это просто объект в памяти Python.
+
+⸻
+
+Почему is_active=True задаём явно
+
+Потому что при создании пользователя мы хотим, чтобы он был активен сразу.
+
+Да, в модели у тебя уже есть default=True, но явное указание здесь нормально и делает код более читаемым.
+
+⸻
+
+Добавление в сессию
+
+self.db.add(user)
+
+Это значит:
+
+SQLAlchemy, возьми этот объект и подготовь его к вставке в БД
+
+Но после add() запись ещё не обязательно физически сохранена.
+
+⸻
+
+Коммит
+
+self.db.commit()
+
+Это очень важная строка.
+
+Она означает:
+
+зафиксировать изменения в базе данных
+
+После commit() пользователь реально будет записан в PostgreSQL.
+
+⸻
+
+Почему нельзя забывать commit()
+
+Если ты сделал:
+
+self.db.add(user)
+
+но не сделал:
+
+self.db.commit()
+
+то запись может не сохраниться.
+
+⸻
+
+Обновление объекта после коммита
+
+self.db.refresh(user)
+
+Что делает refresh
+
+После коммита SQLAlchemy перечитывает объект из БД.
+
+Это нужно, чтобы объект получил значения, которые выставила сама база.
+
+Например:
+ • id
+ • created_at
+ • updated_at
+
+⸻
+
+Почему это полезно
+
+Если ты создаёшь пользователя и сразу хочешь вернуть его дальше в service, то после refresh(user) у объекта уже будет реальный id.
+
+⸻
+
+Возврат результата
+
+return user
+
+То есть метод возвращает уже сохранённого пользователя.
+
+⸻
+
+Как это будет использоваться позже
+
+Примерно так:
+
+repo = UserRepository(db)
+
+existing_user = repo.get_user_by_email("<user@example.com>")
+
+if existing_user is None:
+    new_user = repo.create_user(
+        email="<user@example.com>",
+        password_hash="hashed_password",
+        role=UserRole.admin,
+        family_id=1,
+    )
+
+
+# END FILE CONTENTS
+
+
+# File: Technical Specification_2.md
+
+
+
+# END FILE CONTENTS
+
+
+# File: roadmap.md
+
+
+🎯 ШАГ 0 — Архитектура запуска (Docker-first)
+
+Ты будешь запускать систему как набор сервисов.
+Это уже мини-инфраструктура, а не просто приложение.
+
+⸻
+
+🧱 1. Состав системы (контейнеры)
+
+Минимальный набор:
+
+Обязательные сервисы
+
+ 1. backend
+ • FastAPI приложение
+ • бизнес-логика
+ 2. database
+ • PostgreSQL
+ • хранение данных
+ 3. reverse proxy
+ • HTTPS
+ • доступ из интернета
+ • (рекомендую Caddy)
+
+⸻
+
+Дополнительно (но закладываем сразу)
+ 4. storage (volume)
+ • файлы документов
+ 5. backup service (в будущем)
+ • резервные копии БД и файлов
+
+⸻
+
+🧠 Итоговая схема
+
+Internet
+   ↓
+[ Reverse Proxy (HTTPS) ]
+   ↓
+[ Backend (FastAPI) ]
+   ↓
+[ PostgreSQL ]
+
++ File Storage (volume)
+
+⸻
+
+📁 2. Структура проекта (очень важно)
+
+Ты сейчас закладываешь скелет на месяцы вперёд.
+
+Рекомендуемая структура
+
+home-secretary/
+│
+├── backend/
+│   ├── app/
+│   │   ├── core/          # конфиг, безопасность
+│   │   ├── models/        # модели БД
+│   │   ├── api/           # роуты
+│   │   ├── services/      # бизнес-логика
+│   │   ├── repositories/  # работа с БД
+│   │   └── modules/       # tasks, finance, docs (потом)
+│   │
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── docker/
+│   ├── docker-compose.yml
+│   └── .env
+│
+├── storage/
+│   └── uploads/           # файлы пользователей
+│
+├── README.md
+└── .gitignore
+
+⸻
+
+🧠 Почему такая структура
+
+Это не “красиво”, а архитектурно правильно:
+
+Папка Назначение
+core безопасность, настройки
+models структура БД
+api входные точки
+services логика
+repositories работа с БД
+
+👉 Ты сразу разделяешь:
+ • что приходит (API)
+ • что делает (service)
+ • как хранится (repository)
+
+⸻
+
+⚠️ Типичная ошибка новичка
+
+❌ писать всё в одном файле
+❌ мешать логику и БД
+❌ не разделять слои
+
+👉 потом это невозможно масштабировать
+
+⸻
+
+🐳 3. Docker архитектура (логика)
+
+Ты НЕ пишешь пока compose, ты понимаешь:
+
+Сервис backend
+ • билдится из Dockerfile
+ • зависит от PostgreSQL
+ • получает настройки через .env
+
+⸻
+
+Сервис database
+ • postgres:latest
+ • volume для данных
+
+⸻
+
+Сервис proxy
+ • принимает HTTPS
+ • проксирует на backend
+
+⸻
+
+🔐 4. Переменные окружения (важно сразу)
+
+Ты должен сразу привыкать:
+
+никаких хардкодов
+
+Примеры (без кода):
+ • DATABASE_URL
+ • JWT_SECRET
+ • POSTGRES_USER
+ • POSTGRES_PASSWORD
+ • POSTGRES_DB
+
+⸻
+
+💾 5. Хранение данных
+
+База
+ • PostgreSQL volume
+
+Файлы
+ • storage/uploads/
+
+👉 это важно:
+файлы НЕ в контейнере, а в volume
+
+⸻
+
+⚠️ 6. Критические решения (фиксируем сейчас)
+
+⸻
+
+6.1. Backend = один сервис
+ • НЕ микросервисы
+ • НЕ разделение на 5 контейнеров
+
+👉 один backend
+
+⸻
+
+6.2. БД = отдельный контейнер
+
+👉 обязательно
+
+⸻
+
+6.3. Файлы = вне контейнера
+
+👉 иначе потеряешь данные при пересборке
+
+⸻
+
+6.4. Proxy обязателен
+
+Почему:
+ • HTTPS
+ • домен
+ • безопасность
+
+⸻
+
+
+# END FILE CONTENTS
+
+
+# File: docker/docker-compose.yml
+
+version: "3.9"
+
+services:
+
+  db:
+    image: postgres:16
+    container_name: home_secretary_bd
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+
+    ports:
+      - "5432:5432"
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+
+# END FILE CONTENTS
+
+
+# File: Technical Specification_scheme.md
+
+План файлов и модулей для реализации этого ТЗ
+
+Сейчас дам тебе прикладную структуру проекта, по которой уже можно начинать писать код.
+
+⸻
+
+Предлагаемая структура
+
+backend/
+└── app/
+    ├── core/
+    │   ├── config.py
+    │   ├── security.py
+    │   └── database.py
+    │
+    ├── models/
+    │   ├── family.py
+    │   ├── user.py
+    │   ├── refresh_token.py
+    │   ├── password_reset_token.py
+    │   └── audit_log.py
+    │
+    ├── schemas/
+    │   ├── auth.py
+    │   ├── user.py
+    │   └── family.py
+    │
+    ├── repositories/
+    │   ├── family_repository.py
+    │   ├── user_repository.py
+    │   ├── refresh_token_repository.py
+    │   ├── password_reset_repository.py
+    │   └── audit_log_repository.py
+    │
+    ├── services/
+    │   └── auth_service.py
+    │
+    ├── api/
+    │   └── auth.py
+    │
+    └── main.py
+
+⸻
+
+Что делает каждый слой
+
+Это нужно понять до написания кода.
+
+⸻
+
+1. models/
+
+Это модели БД.
+
+Здесь описывается:
+ • как выглядят таблицы в Python
+ • какие поля есть
+ • какие типы
+ • какие связи
+
+⸻
+
+1. schemas/
+
+Это схемы входа и выхода API.
+
+Здесь описывается:
+ • что принимает endpoint
+ • что возвращает endpoint
+ • какие поля валидируются
+
+Например:
+ • RegisterRequest
+ • LoginRequest
+ • TokenResponse
+ • MeResponse
+
+⸻
+
+1. repositories/
+
+Это слой работы с БД.
+
+Здесь должна быть логика типа:
+ • создать пользователя
+ • найти пользователя по email
+ • сохранить refresh token
+ • отозвать refresh token
+ • создать audit log
+
+То есть:
+
+repository = “чистая работа с таблицами”
+
+⸻
+
+1. services/
+
+Это бизнес-логика.
+
+Именно здесь ты собираешь сценарии:
+ • register
+ • login
+ • refresh
+ • logout
+ • password reset
+
+То есть:
+
+service = “что система делает по шагам”
+
+⸻
+
+1. api/
+
+Это HTTP-слой.
+
+Только:
+ • endpoint
+ • принять запрос
+ • вызвать service
+ • вернуть ответ
+
+Здесь нельзя писать:
+ • SQL
+ • hash-пароля
+ • JWT-логику
+ • сложную бизнес-логику
+
+⸻
+
+1. core/
+
+Это базовая инфраструктура приложения.
+
+⸻
+
+config.py
+
+Настройки:
+ • DATABASE_URL
+ • JWT_SECRET
+ • ACCESS_TOKEN_EXPIRE_MINUTES
+ • REFRESH_TOKEN_EXPIRE_DAYS
+
+⸻
+
+security.py
+
+Безопасность:
+ • hash password
+ • verify password
+ • create access token
+ • create refresh token
+ • hash refresh token
+ • hash reset token
+
+⸻
+
+database.py
+
+Подключение к PostgreSQL:
+ • engine
+ • session
+ • base model
+
+⸻
+
+Что именно должно быть в каждом файле
+
+Теперь уже совсем прикладно.
+
+⸻
+
+models/family.py
+
+Модель families
+
+Поля:
+ • id
+ • name
+ • created_at
+ • created_by
+
+⸻
+
+models/user.py
+
+Модель users
+
+Поля:
+ • id
+ • email
+ • password_hash
+ • role
+ • is_active
+ • family_id
+ • created_at
+ • updated_at
+
+⸻
+
+models/refresh_token.py
+
+Модель refresh_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • revoked_at
+ • created_at
+ • ip_address
+ • user_agent
+
+⸻
+
+models/password_reset_token.py
+
+Модель password_reset_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • used_at
+ • created_at
+
+⸻
+
+models/audit_log.py
+
+Модель audit_logs
+
+Поля:
+ • id
+ • user_id
+ • event_type
+ • ip_address
+ • user_agent
+ • created_at
+ • details
+
+⸻
+
+Схемы (schemas/)
+
+⸻
+
+schemas/auth.py
+
+Здесь должны быть схемы:
+
+Request
+ • RegisterRequest
+ • LoginRequest
+ • RefreshRequest
+ • LogoutRequest
+ • PasswordResetRequest
+ • PasswordResetConfirmRequest
+
+Response
+ • RegisterResponse
+ • TokenResponse
+ • MessageResponse
+
+⸻
+
+schemas/user.py
+
+Например:
+ • CurrentUserResponse
+
+⸻
+
+schemas/family.py
+
+Пока можно минимально или вообще не делать отдельно, если family возвращается только внутри register response.
+
+⸻
+
+Repository-файлы
+
+⸻
+
+repositories/user_repository.py
+
+Должны быть функции/методы:
+ • create_user
+ • get_user_by_email
+ • get_user_by_id
+ • update_user_password
+ • set_user_active_status
+
+⸻
+
+repositories/family_repository.py
+ • create_family
+ • get_family_by_id
+ • list_family_users
+
+⸻
+
+repositories/refresh_token_repository.py
+ • create_refresh_token
+ • get_valid_refresh_token
+ • revoke_refresh_token
+ • revoke_all_user_refresh_tokens
+
+⸻
+
+repositories/password_reset_repository.py
+ • create_password_reset_token
+ • get_valid_password_reset_token
+ • mark_password_reset_token_used
+ • invalidate_user_reset_tokens
+
+⸻
+
+repositories/audit_log_repository.py
+ • create_audit_log
+ • list_user_audit_logs
+
+⸻
+
+Service-слой
+
+⸻
+
+services/auth_service.py
+
+Это главный файл текущего этапа.
+
+Здесь должны быть методы:
+ • register_user
+ • login_user
+ • get_current_user
+ • refresh_access_token
+ • logout_user
+ • request_password_reset
+ • confirm_password_reset
+
+Именно здесь будет собираться сценарий из нескольких repository-вызовов.
+
+⸻
+
+API-слой
+
+⸻
+
+api/auth.py
+
+Здесь endpoint’ы:
+ • POST /auth/register
+ • POST /auth/login
+ • GET /auth/me
+ • POST /auth/refresh
+ • POST /auth/logout
+ • POST /auth/password-reset/request
+ • POST /auth/password-reset/confirm
+
+⸻
+
+Порядок написания кода
+
+Вот это уже тебе как рабочий план.
+
+⸻
+
+Этап 1
+
+Создать инфраструктуру:
+ • database.py
+ • config.py
+ • security.py
+
+⸻
+
+Этап 2
+
+Создать все models/
+
+⸻
+
+Этап 3
+
+Создать schemas/auth.py и schemas/user.py
+
+⸻
+
+Этап 4
+
+Создать все repositories/
+
+⸻
+
+Этап 5
+
+Создать auth_service.py
+
+⸻
+
+Этап 6
+
+Создать api/auth.py
+
+⸻
+
+Этап 7
+
+Подключить всё в main.py
+
+⸻
+
+Как не запутаться
+
+Твоя ошибка будет, если ты начнёшь так:
+ • сначала endpoint
+ • потом в нём SQL
+ • потом там же JWT
+ • потом там же hash пароля
+
+Так делать нельзя.
+
+Правильная цепочка:
+
+API -> Service -> Repository -> DB
+
+⸻
+
+Что я рекомендую начать писать первым
+
+Самый правильный старт:
+
+Шаг 1
+
+database.py
+
+Шаг 2
+
+models/
+
+Шаг 3
+
+user_repository.py и family_repository.py
+
+Потому что без этого дальше auth всё равно не собрать.
+
+⸻
+
+Конкретный вывод
+
+Да, всё выше — это одно ТЗ.
+А то, что я дал сейчас, — это уже план реализации этого ТЗ по файлам.
+
+⸻
+
+Следующий шаг
+
+Теперь уже логично не обсуждать абстракции, а зафиксировать первую практическую задачу на код.
+
+Первая задача:
+
+создать database.py и весь пакет models/
+
+Если хочешь, следующим сообщением я подготовлю тебе отдельное маленькое ТЗ только на первый подшаг:
+core/database.py + models/*
+чтобы ты начал писать код не по всему модулю сразу, а по одному куску.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/audit_log_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.audit_log import AuditLog
+
+
+class AuditLogRepository:
+    """EN: Repository for working with ``audit_logs`` records.
+
+    Audit repositories are often intentionally simple:
+    write a log entry and later read log history back.
+
+    RU: Репозиторий для работы с записями ``audit_logs``.
+
+    Репозитории аудита часто специально делают простыми:
+    записать событие в журнал и позже прочитать историю назад.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Accept the active session used for audit read/write operations.
+
+        Args:
+            db: Active SQLAlchemy session used to insert and read audit rows.
+
+        RU: Принимает активную сессию для операций записи и чтения аудита.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия для добавления и чтения записей аудита.
+        """
+
+        self.db = db
+
+    def create_audit_log(
+        self,
+        user_id: int | None,
+        event_type: str,
+        ip_address: str | None,
+        user_agent: str | None,
+        details: dict,
+    ) -> AuditLog:
+        """EN: Create a security audit entry and return the saved ORM object.
+
+        Args:
+            user_id: Related user identifier or ``None`` if the event is anonymous.
+            event_type: Short event name, for example login or logout.
+            ip_address: Client IP address if available.
+            user_agent: Client user-agent string if available.
+            details: Extra event metadata stored in JSONB.
+
+        Returns:
+            Saved ``AuditLog`` ORM object.
+
+        RU: Создаёт запись аудита безопасности и возвращает сохранённый ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор связанного пользователя или ``None``,
+                если событие анонимное.
+            event_type: короткое имя события, например login или logout.
+            ip_address: IP-адрес клиента, если он известен.
+            user_agent: строка User-Agent клиента, если она известна.
+            details: дополнительная метаинформация о событии, которая хранится в JSONB.
+
+        Возвращает:
+            Сохранённый ORM-объект ``AuditLog``.
+        """
+
+        audit_log = AuditLog(
+            user_id=user_id,
+            event_type=event_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details,
+        )
+
+        self.db.add(audit_log)
+        self.db.commit()
+        self.db.refresh(audit_log)
+
+        return audit_log
+
+    def get_audit_logs_by_user_id(self, user_id: int) -> list[AuditLog]:
+        """EN: Return all audit log rows related to a specific user.
+
+        Args:
+            user_id: Identifier of the user whose audit history is requested.
+
+        Returns:
+            List of ``AuditLog`` objects.
+
+        RU: Возвращает все записи журнала аудита, связанные с конкретным пользователем.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чья история аудита запрашивается.
+
+        Возвращает:
+            Список объектов ``AuditLog``.
+        """
+
+        return (
+            self.db.query(AuditLog)
+            .filter(AuditLog.user_id == user_id)
+            .all()
+        )
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/3.md
+
+1. first()
+
+self.db.query(User).filter(User.email == email).first()
+
+Что делает
+
+Берёт первую найденную запись.
+
+Что вернёт
+ • объект ORM-модели
+ • или None, если ничего нет
+
+Когда использовать
+
+Когда:
+ • нужна одна запись
+ • и тебе не страшно, что их теоретически может быть несколько
+
+⸻
+
+1. scalar()
+
+self.db.query(User.id).filter(User.email == email).scalar()
+
+Что делает
+
+Возвращает одно скалярное значение.
+
+Скалярное = одно простое значение:
+ • число
+ • строка
+ • дата
+
+Что вернёт
+ • например 5
+ • или None
+
+Когда использовать
+
+Когда ты выбираешь одну колонку, а не весь объект.
+
+⸻
+
+1. all()
+
+self.db.query(User).all()
+
+Что делает
+
+Возвращает все найденные записи
+
+Что вернёт
+
+Список:
+
+[User(...), User(...), User(...)]
+
+или пустой список:
+
+[]
+
+Когда использовать
+
+Когда нужно получить много объектов.
+
+Например:
+ • всех пользователей семьи
+ • все audit log записи пользователя
+
+⸻
+
+1. one()
+
+self.db.query(User).filter(User.email == email).one()
+
+Что делает
+
+Требует, чтобы результат был ровно один
+
+Что будет
+ • если запись одна → вернёт её
+ • если записей нет → ошибка
+ • если записей больше одной → ошибка
+
+Когда использовать
+
+Когда ты уверен, что должна быть ровно одна запись, и хочешь жёсткое поведение.
+
+⸻
+
+1. one_or_none()
+
+self.db.query(User).filter(User.email == email).one_or_none()
+
+Что делает
+
+Ожидает:
+ • либо одну запись
+ • либо ни одной
+
+Что будет
+ • одна запись → вернёт объект
+ • нет записей → None
+ • больше одной → ошибка
+
+Когда использовать
+
+Когда запись должна быть уникальной, и ты хочешь это контролировать.
+
+Для email, например, это часто хороший вариант, потому что email у тебя уникален.
+
+⸻
+
+1. count()
+
+self.db.query(User).count()
+
+Что делает
+
+Возвращает количество записей
+
+Что вернёт
+
+Число:
+
+5
+
+Когда использовать
+
+Когда нужно узнать, сколько строк найдено.
+
+Например:
+ • сколько пользователей в семье
+ • сколько активных токенов у пользователя
+
+⸻
+
+1. scalar_one() и scalar_one_or_none()
+
+Это уже более новый и строгий стиль, чаще используется в SQLAlchemy 2.x через select(). Пока тебе рано в это углубляться.
+Для текущего этапа тебе достаточно понять:
+ • first()
+ • scalar()
+ • all()
+ • one_or_none()
+
+⸻
+
+Самая понятная таблица
+
+Метод Возвращает Если нет записей Если много записей
+first() первая запись None просто возьмёт первую
+scalar() одно значение None зависит от запроса
+all() список [] список всех
+one() ровно одну запись ошибка ошибка
+one_or_none() одну запись или None None ошибка
+count() число 0 число
+
+⸻
+
+На одном живом примере
+
+Допустим, у тебя есть таблица пользователей.
+
+⸻
+
+Получить одного пользователя
+
+user = self.db.query(User).filter(User.email == email).first()
+
+Результат
+ • объект User
+ • или None
+
+⸻
+
+Получить только его id
+
+user_id = self.db.query(User.id).filter(User.email == email).scalar()
+
+Результат
+ • 1
+ • или None
+
+⸻
+
+Получить всех пользователей семьи
+
+users = self.db.query(User).filter(User.family_id == family_id).all()
+
+Результат
+ • список объектов User
+
+⸻
+
+Жёстко проверить, что email уникален
+
+user = self.db.query(User).filter(User.email == email).one_or_none()
+
+Результат
+ • один пользователь
+ • или None
+ • если в БД бардак и email дублируется — ошибка
+
+⸻
+
+Что тебе лучше использовать сейчас
+
+Для твоего текущего уровня и проекта:
+
+чаще всего:
+ • first()
+ • all()
+
+иногда:
+ • scalar()
+
+реже, но полезно:
+ • one_or_none()
+
+⸻
+
+Практическое правило для тебя
+
+Нужен объект → first()
+
+query(User)...first()
+
+Нужен список объектов → all()
+
+query(User)...all()
+
+Нужно одно поле → scalar()
+
+query(User.id)...scalar()
+
+Нужна строгая уникальность → one_or_none()
+
+query(User)...one_or_none()
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/refresh_token_repository.py
+
+from datetime import datetime,timezone
+
+from sqlalchemy.orm import Session
+
+from app.models.refresh_token import RefreshToken
+
+
+class RefreshTokenRepository:
+    """EN: Repository for low-level work with ``refresh_tokens`` data.
+
+    It keeps token-related SQLAlchemy operations in one place
+    so auth logic stays cleaner in higher layers.
+
+    RU: Репозиторий для низкоуровневой работы с данными ``refresh_tokens``.
+
+    Он собирает token-related операции SQLAlchemy в одном месте,
+    чтобы auth-логика в верхних слоях оставалась чище.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Save the session object that all repository methods will use.
+
+        Args:
+            db: Active SQLAlchemy session used for token queries and writes.
+
+        RU: Сохраняет объект Session, через который будут работать все методы репозитория.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия для запросов и записи токенов.
+        """
+
+        self.db = db
+
+    def get_refresh_token_by_user_id(self, user_id: int) -> RefreshToken | None:
+        """EN: Return the first refresh token record for a user or ``None``.
+
+        Args:
+            user_id: Identifier of the user whose token is being searched.
+
+        Returns:
+            ``RefreshToken`` object or ``None``.
+
+        RU: Возвращает первую запись refresh token пользователя или ``None``.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чей токен ищется.
+
+        Возвращает:
+            Объект ``RefreshToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(RefreshToken)
+            .filter(RefreshToken.user_id == user_id)
+            .first()
+        )
+
+    def get_refresh_token_by_token_hash(self, token: str) -> RefreshToken | None:
+        """EN: Find a refresh token row by its stored hash.
+
+        Args:
+            token: Hashed refresh token value stored in the database.
+
+        Returns:
+            Matching ``RefreshToken`` object or ``None``.
+
+        RU: Ищет запись refresh token по сохранённому hash-значению.
+
+        Аргументы:
+            token: хеш refresh token, который хранится в базе данных.
+
+        Возвращает:
+            Найденный объект ``RefreshToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(RefreshToken)
+            .filter(RefreshToken.token_hash == token)
+            .first()
+        )
+    def create_refresh_token(
+        self,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+        ip_address: str,
+        user_agent: str,
+    ) -> RefreshToken:
+        """EN: Create a refresh token record, save its hash, and return the ORM object.
+
+        Args:
+            user_id: Token owner identifier.
+            token_hash: Hashed token value stored in the database.
+            expires_at: Datetime when the token becomes invalid.
+            ip_address: Client IP address from which the token was issued.
+            user_agent: Client user-agent string.
+
+        Returns:
+            Saved ``RefreshToken`` ORM object.
+
+        RU: Создаёт запись refresh token, сохраняет её hash и возвращает ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор владельца токена.
+            token_hash: хеш токена, который будет храниться в базе.
+            expires_at: дата и время, после которых токен считается недействительным.
+            ip_address: IP-адрес клиента, с которого был выдан токен.
+            user_agent: строка User-Agent клиента.
+
+        Возвращает:
+            Сохранённый ORM-объект ``RefreshToken``.
+        """
+
+        refresh_token = RefreshToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+        self.db.add(refresh_token)
+        self.db.commit()
+        self.db.refresh(refresh_token)
+
+        return refresh_token
+
+
+    def revoke_refresh_token(self, token_hash: str):
+        """EN: Mark a refresh token as revoked and return the updated row.
+
+        Args:
+            token_hash: Hashed refresh token value that should be revoked.
+
+        Returns:
+            Updated ``RefreshToken`` ORM object.
+
+        Raises:
+            ValueError: If the token does not exist or is already revoked.
+
+        RU: Помечает refresh token как отозванный и возвращает обновлённую запись.
+
+        Аргументы:
+            token_hash: хеш refresh token, который нужно отозвать.
+
+        Возвращает:
+            Обновлённый ORM-объект ``RefreshToken``.
+
+        Исключения:
+            ValueError: Если токен не существует или уже отозван.
+        """
+
+        data = self.db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
+        if not data:
+            raise ValueError ('Токена не существует')
+        
+        if data.revoked_at:
+            raise ValueError ('Токен отозван')
+        data.revoked_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(data)
+        return data
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/database.py
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+
+# Это временное упрощение для учебного этапа.
+# Пока строка подключения лежит прямо здесь, чтобы вся базовая настройка БД
+# была видна в одном месте и не расползалась по нескольким файлам слишком рано.
+DATABASE_URL = "postgresql+psycopg://home_secretary:YOUR_PASSWORD@localhost:5432/home_secretary"
+
+
+# Представь engine как "технический вход" в PostgreSQL:
+# он умеет открывать реальные подключения, но это ещё не тот объект,
+# через который обычно создают, читают и обновляют ORM-сущности.
+engine = create_engine(DATABASE_URL)
+
+# SessionLocal - это фабрика, а не готовая сессия.
+# Каждый вызов SessionLocal() создаёт отдельный объект Session,
+# и уже эта Session становится рабочим столом для ORM-операций.
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+# Base - это общий родитель для ORM-моделей.
+# Как только класс наследуется от Base, SQLAlchemy начинает воспринимать его
+# как часть declarative-подхода и ждёт, что внутри будет описание таблицы.
+Base = declarative_base()
+
+def get_db():
+    """This function:
+    1. creates a new SQLAlchemy Session,
+    2. yields it to the caller (e.g. FastAPI dependency),
+    3. guarantees that the session is closed after use.
+
+    RU: Предоставляет сессию базы данных на время выполнения запроса.
+
+    Функция:
+    1. создаёт новую Session,
+    2. отдаёт её наружу (например, в endpoint или сервис),
+    3. гарантированно закрывает соединение после завершения работы.
+    """
+
+    # 1. создаём новую сессию через фабрику SessionLocal
+    # каждая сессия — это отдельное подключение/контекст работы с БД
+    db = SessionLocal()
+
+    try:
+        # 2. отдаём сессию наружу
+        # здесь выполнение "приостанавливается", и код, который вызвал get_db(),
+        # получает доступ к db (Session)
+        yield db
+
+    finally:
+        # 3. этот блок выполнится ВСЕГДА
+        # даже если внутри запроса произошла ошибка
+        # закрываем соединение с БД, чтобы не было утечек
+        db.close()
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/security.py
+
+from pwdlib import PasswordHash
+from datetime import datetime, timedelta, timezone
+import jwt
+import secrets
+import string
+import hashlib
+from config import secret_key as SECRET_KEY
+
+
+
+def validation_password(password: str):
+    """EN: Validate a raw password against the current password policy.
+
+    The function trims outer whitespace and checks basic strength rules:
+    minimum length, at least one special symbol, one uppercase letter,
+    and one digit.
+
+    Args:
+        password: Raw password entered by the user.
+
+    Returns:
+        Normalized password string after validation.
+
+    Raises:
+        ValueError: If the password does not satisfy the policy.
+
+    RU: Проверяет сырой пароль на соответствие текущей парольной политике.
+
+    Функция убирает внешние пробелы и проверяет базовые правила сложности:
+    минимальную длину, наличие спецсимвола, одной заглавной буквы
+    и одной цифры.
+
+    Аргументы:
+        password: пароль, который ввёл пользователь.
+
+    Возвращает:
+        Нормализованную строку пароля после успешной проверки.
+
+    Исключения:
+        ValueError: Если пароль не проходит проверку по правилам.
+    """
+
+    password = password.strip()
+    if len(password) < 8:
+        raise ValueError ('Пароль слишком короткий')
+    if not any(x in password for x in "@`~!?$#*&^()"):
+        raise ValueError('Пароль должен содержать спецсимвол')
+    if not any(char.isupper() for char in password):
+        raise ValueError("Пароль должен содержать хотя бы одну заглавную букву")
+    if not any(char.isdigit() for char in password):
+        raise ValueError("Пароль должен содержать цифры")
+    return password
+
+def get_password_hash(password):
+    """EN: Validate a password and return its secure hash representation.
+
+    Args:
+        password: Raw password string before hashing.
+
+    Returns:
+        Password hash generated by ``pwdlib``.
+
+    RU: Проверяет пароль и возвращает его безопасный хеш.
+
+    Аргументы:
+        password: сырой пароль до хеширования.
+
+    Возвращает:
+        Хеш пароля, созданный через ``pwdlib``.
+    """
+
+    password = validation_password(password)
+    password_hash = PasswordHash.recommended()
+    hash_ = password_hash.hash(password)
+    return hash_
+
+def verify_password(password,password_hash):
+    """EN: Compare a raw password with a stored password hash.
+
+    Args:
+        password: Raw password provided for verification.
+        password_hash: Stored hash from the database.
+
+    Returns:
+        ``True`` if the password matches the hash, otherwise ``False``.
+
+    RU: Сравнивает сырой пароль с сохранённым хешем пароля.
+
+    Аргументы:
+        password: пароль, который пришёл на проверку.
+        password_hash: хеш пароля, сохранённый в базе данных.
+
+    Возвращает:
+        ``True``, если пароль совпадает с хешем, иначе ``False``.
+    """
+
+    pass_hash = PasswordHash.recommended()
+    valid = pass_hash.verify(password, password_hash)
+    return valid
+
+def create_access_token(user_id,role):
+    """EN: Create a short-lived JWT access token for the authenticated user.
+
+    Args:
+        user_id: Identifier of the authenticated user.
+        role: User role object whose value is written into the JWT payload.
+
+    Returns:
+        Encoded JWT access token string.
+
+    RU: Создаёт короткоживущий JWT access token для аутентифицированного пользователя.
+
+    Аргументы:
+        user_id: идентификатор аутентифицированного пользователя.
+        role: объект роли пользователя, значение которого попадёт в payload JWT.
+
+    Возвращает:
+        Закодированную строку JWT access token.
+    """
+
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    payload = {
+    "user_id": user_id,
+    "role": role.value,
+    "exp": expires_at,
+}
+    secret_key = SECRET_KEY
+
+    token = jwt.encode(payload, secret_key, algorithm="HS256")
+    return token
+
+
+def create_refresh_token():
+    """EN: Generate a random refresh token string.
+
+    Returns:
+        Random token composed of latin letters and digits.
+
+    RU: Генерирует случайную строку refresh token.
+
+    Возвращает:
+        Случайный токен, составленный из латинских букв и цифр.
+    """
+
+    alphabet = string.ascii_letters + string.digits
+    refresh_token = ''.join(secrets.choice(alphabet) for i in range(20))
+    
+    return refresh_token
+
+
+
+def hash_token(token):
+    """EN: Return the SHA-256 hash of a token string.
+
+    Args:
+        token: Raw token value that should not be stored directly.
+
+    Returns:
+        Hexadecimal SHA-256 digest.
+
+    RU: Возвращает SHA-256 хеш для строки токена.
+
+    Аргументы:
+        token: сырой токен, который не нужно хранить в базе напрямую.
+
+    Возвращает:
+        Шестнадцатеричное представление SHA-256 хеша.
+    """
+
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/user.py
+
+from datetime import datetime
+import enum
+
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class UserRole(enum.Enum):
+    """EN: Enumeration of user roles inside one family space.
+
+    Using an enum makes the allowed role values explicit and easier to control.
+
+    RU: Перечисление ролей пользователя внутри одной семейной группы.
+
+    Использование enum делает допустимые значения роли явными
+    и помогает лучше контролировать их в коде и схеме БД.
+    """
+
+    admin = "admin"
+    user = "user"
+
+
+class User(Base):
+    """EN: ORM model for the ``users`` table.
+
+    The class stores the core identity data for a user:
+    email, password hash, role, activity flag, and relation to a family.
+
+    RU: ORM-модель таблицы ``users``.
+
+    Этот класс хранит базовые данные пользователя:
+    email, хеш пароля, роль, признак активности и связь с семьёй.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # Это очень полезный учебный приём:
+    # вместо того чтобы везде доверять "обычным строкам", мы заворачиваем роль в Enum.
+    # Так сама модель подсказывает, какие значения вообще допустимы.
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
+    # Обрати внимание на отличие от ``server_default``:
+    # ``default=True`` срабатывает на стороне Python/ORM в момент создания объекта.
+    # То есть значение появляется ещё до того, как INSERT уйдёт в базу.
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    family_id: Mapped[int] = mapped_column(
+        BigInteger,
+        # ``ondelete="CASCADE"`` - это не "магия Python".
+        # Это подсказка самой базе данных, что делать с зависимыми строками,
+        # если родительская запись family будет удалена.
+        ForeignKey("families.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    # Сейчас ``updated_at`` ведёт себя скорее как "поле с первоначальным временем":
+    # значение проставляется при INSERT, но автоматическое обновление при UPDATE
+    # ещё не настроено. Для раннего учебного этапа это обычное упрощение.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/password_reset_repository.py
+
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.password_reset_token import PasswordResetToken
+
+
+class PasswordResetTokenRepository:
+    """EN: Repository for database operations on ``password_reset_tokens``.
+
+    This class keeps reset-token queries together:
+    create, search, read hash values, and mark tokens as used.
+
+    RU: Репозиторий для операций с базой данных над ``password_reset_tokens``.
+
+    Этот класс держит запросы к reset-token в одном месте:
+    создание, поиск, чтение hash-значений и пометка токенов как использованных.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Store the active session used for password reset token queries.
+
+        Args:
+            db: Active SQLAlchemy session used by this repository.
+
+        RU: Сохраняет активную сессию, через которую выполняются запросы к токенам сброса.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия, через которую работает репозиторий.
+        """
+
+        self.db = db
+
+    def get_token_hash_by_user_id(self, user_id: int) -> str | None:
+        """EN: Return only the token hash for a user or ``None``.
+
+        Notice that this query asks not for the whole ORM object,
+        but for one scalar value from one column.
+
+        Args:
+            user_id: Identifier of the user whose token hash is requested.
+
+        Returns:
+            Token hash string or ``None``.
+
+        RU: Возвращает только hash токена пользователя или ``None``.
+
+        Обрати внимание: этот запрос просит не целый ORM-объект,
+        а одно скалярное значение из одной колонки.
+
+        Аргументы:
+            user_id: идентификатор пользователя, для которого ищется hash токена.
+
+        Возвращает:
+            Строку с hash токена или ``None``.
+        """
+
+        return (
+            self.db.query(PasswordResetToken.token_hash)
+            .filter(PasswordResetToken.user_id == user_id)
+            .scalar()
+        )
+
+    def create_password_reset_token(
+        self,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> PasswordResetToken:
+        """EN: Create a password reset token row and return the saved ORM object.
+
+        Args:
+            user_id: User identifier.
+            token_hash: Hashed reset token value.
+            expires_at: Expiration datetime for the reset token.
+
+        Returns:
+            Saved ``PasswordResetToken`` ORM object.
+
+        RU: Создаёт запись токена сброса пароля и возвращает сохранённый ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор пользователя.
+            token_hash: хеш токена сброса пароля.
+            expires_at: дата и время истечения токена.
+
+        Возвращает:
+            Сохранённый ORM-объект ``PasswordResetToken``.
+        """
+
+        password_reset_token = PasswordResetToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+
+        self.db.add(password_reset_token)
+        self.db.commit()
+        self.db.refresh(password_reset_token)
+
+        return password_reset_token
+
+    def get_password_reset_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> PasswordResetToken | None:
+        """EN: Find a reset token row by its hash and return it or ``None``.
+
+        Args:
+            token_hash: Hash value used to find the row.
+
+        Returns:
+            Matching ``PasswordResetToken`` or ``None``.
+
+        RU: Ищет запись токена по его hash и возвращает объект или ``None``.
+
+        Аргументы:
+            token_hash: hash-значение, по которому ищется запись.
+
+        Возвращает:
+            Найденный ``PasswordResetToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(PasswordResetToken)
+            .filter(PasswordResetToken.token_hash == token_hash)
+            .first()
+        )
+
+    def mark_token_as_used(self, token_hash: str) -> PasswordResetToken | None:
+        """EN: Mark a reset token as used if it exists and return the updated row.
+
+        The method first loads the token, then changes the ``used_at`` field,
+        commits the transaction, and refreshes the ORM object.
+
+        Args:
+            token_hash: Hash of the token that should be marked as used.
+
+        Returns:
+            Updated ``PasswordResetToken`` object or ``None``.
+
+        RU: Помечает токен использованным, если он найден, и возвращает обновлённую запись.
+
+        Метод сначала загружает токен, затем меняет поле ``used_at``,
+        фиксирует транзакцию и обновляет ORM-объект.
+
+        Аргументы:
+            token_hash: hash токена, который нужно пометить как использованный.
+
+        Возвращает:
+            Обновлённый объект ``PasswordResetToken`` или ``None``.
+        """
+
+        token = (
+            self.db.query(PasswordResetToken)
+            .filter(PasswordResetToken.token_hash == token_hash)
+            .first()
+        )
+
+        if token is None:
+            return None
+
+        # Эта строка - момент "изменения состояния":
+        # сначала меняется ORM-объект в памяти,
+        # и только после ``commit`` это изменение становится постоянным в БД.
+        token.used_at = datetime.now()
+
+        self.db.commit()
+        self.db.refresh(token)
+
+        return token
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/1.md
+
+Да. Начнём вместе и очень медленно.
+Сейчас делаем только database.py. Никаких моделей пока.
+
+⸻
+
+Что мы сейчас строим
+
+Тебе нужен файл, который будет отвечать за 3 вещи:
+ 1. подключение к PostgreSQL
+ 2. создание “базового класса” для ORM-моделей
+ 3. создание сессий для работы с БД
+
+В SQLAlchemy это стандартная схема: create_engine() создаёт “двигатель” подключения, sessionmaker() создаёт фабрику сессий, а declarative_base() даёт базовый класс, от которого наследуются ORM-модели. Это базовый паттерн ORM в официальной документации SQLAlchemy.  ￼
+
+⸻
+
+Сначала теория простыми словами
+
+Что такое engine
+
+engine — это не “соединение с БД прямо сейчас”, а объект, который умеет подключаться к базе и управлять соединениями.
+Представь его как диспетчера доступа к PostgreSQL. Когда приложению понадобится база, оно попросит у engine соединение. Это соответствует тому, как SQLAlchemy описывает create_engine() и дальнейшую работу через Session.  ￼
+
+Что такое Session
+
+Session — это уже рабочий инструмент, через который твой код будет:
+ • читать данные,
+ • добавлять строки,
+ • изменять записи,
+ • делать commit/rollback.
+
+Если говорить очень грубо:
+engine = “доступ к кухне”,
+session = “рабочий стол, на котором ты готовишь”.
+В документации SQLAlchemy Session описывается как основной ORM-объект для разговора с базой.  ￼
+
+Что такое Base
+
+Base — это общий родитель для всех ORM-моделей.
+Когда ты потом напишешь класс User(Base), SQLAlchemy поймёт:
+ • это ORM-модель,
+ • у неё будет таблица,
+ • её поля соответствуют колонкам БД.
+
+Это и есть declarative mapping в SQLAlchemy.  ￼
+
+⸻
+
+Почему мы не пишем модели прямо сейчас
+
+Потому что модели должны на что-то опираться.
+
+Сначала нужен фундамент:
+ • строка подключения,
+ • engine,
+ • SessionLocal,
+ • Base.
+
+И только потом:
+ • User,
+ • Family,
+ • RefreshToken и так далее.
+
+Если начать с моделей без Base и без нормального подключения, получится каша.
+
+⸻
+
+Какой файл мы сейчас создаём
+
+Путь:
+
+backend/app/core/database.py
+
+⸻
+
+Что будет внутри файла
+
+В этом файле должны быть:
+ 1. импорт нужных частей SQLAlchemy
+ 2. переменная DATABASE_URL
+ 3. объект engine
+ 4. фабрика сессий SessionLocal
+ 5. базовый класс Base
+
+⸻
+
+Сразу важное решение
+
+Пока у тебя ещё нет config.py, мы временно зададим DATABASE_URL прямо в database.py.
+
+Это не идеал.
+Но это правильное временное упрощение, чтобы не расползаться на 5 файлов сразу.
+
+Позже мы вынесем это в настройки.
+
+⸻
+
+Как выглядит строка подключения к PostgreSQL
+
+Для SQLAlchemy она обычно выглядит так:
+
+postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME
+
+Это зависит от драйвера. Для PostgreSQL SQLAlchemy использует диалект PostgreSQL, а дальше нужен DBAPI-драйвер. В современных проектах часто используют psycopg/psycopg3, и строка подключения задаётся через SQLAlchemy URL.  ￼
+
+Для твоего локального docker-сценария логика будет такой:
+ • пользователь: home_secretary
+ • пароль: твой пароль из .env
+ • хост: localhost или имя сервиса db — зависит от того, откуда подключаешься
+ • порт: 5432
+ • база: home_secretary
+
+⸻
+
+Очень важный момент про host
+
+Если Python-приложение запускается:
+
+снаружи Docker, на твоём компьютере
+
+то host обычно будет:
+
+localhost
+
+внутри Docker Compose, в другом контейнере
+
+то host должен быть:
+
+db
+
+Потому что db — это имя сервиса в compose-сети.
+
+Сейчас, пока ты не запускаешь всё целиком, можно временно взять localhost.
+
+⸻
+
+Теперь сам код database.py
+
+Скопируй ровно так, а потом я разберу каждую строку.
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+DATABASE_URL = "postgresql+psycopg://home_secretary:YOUR_PASSWORD@localhost:5432/home_secretary"
+
+engine = create_engine(DATABASE_URL)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+Base = declarative_base()
+
+⸻
+
+Разбор каждой строки
+
+1. Импорт create_engine
+
+from sqlalchemy import create_engine
+
+Это функция, которая создаёт engine.
+
+То есть именно она превращает строку подключения в объект, через который SQLAlchemy сможет работать с PostgreSQL. Это соответствует официальной ORM quickstart-схеме SQLAlchemy.  ￼
+
+⸻
+
+1. Импорт declarative_base и sessionmaker
+
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+Здесь два ключевых инструмента:
+
+declarative_base
+
+создаёт базовый класс для моделей.
+
+sessionmaker
+
+создаёт “фабрику сессий”.
+
+То есть потом ты не будешь вручную писать новую Session сложным способом.
+Ты просто вызовешь SessionLocal() и получишь рабочую ORM-сессию. Это стандартный паттерн из документации SQLAlchemy.  ￼
+
+⸻
+
+1. DATABASE_URL
+
+DATABASE_URL = "postgresql+psycopg://home_secretary:YOUR_PASSWORD@localhost:5432/home_secretary"
+
+Это строка подключения.
+
+Разберём её по частям:
+
+postgresql+psycopg
+ • postgresql — диалект БД
+ • psycopg — драйвер
+
+home_secretary:YOUR_PASSWORD
+ • логин
+ • пароль
+
+localhost:5432
+ • адрес
+ • порт
+
+/home_secretary
+ • имя базы
+
+⸻
+
+1. engine
+
+engine = create_engine(DATABASE_URL)
+
+Здесь создаётся engine.
+
+Он:
+ • не является таблицей,
+ • не является сессией,
+ • не является ORM-моделью.
+
+Он — “точка входа” в базу на инфраструктурном уровне.
+
+⸻
+
+1. SessionLocal
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+Это фабрика сессий.
+
+bind=engine
+
+говорит:
+
+все создаваемые сессии будут работать через этот engine
+
+autoflush=False
+
+пока не будем углубляться, но смысл такой:
+ • SQLAlchemy не будет без спроса стараться автоматически синхронизировать изменения перед каждым запросом.
+
+Для начала это хороший, спокойный режим.
+
+autocommit=False
+
+означает:
+ • commit нужно делать явно.
+
+Это правильно.
+Потому что backend должен сам понимать, когда транзакция успешна, а когда нужен rollback.
+
+⸻
+
+1. Base
+
+Base = declarative_base()
+
+Это база всех моделей.
+
+Потом ты будешь писать что-то вроде:
+
+class User(Base):
+    ...
+
+И именно благодаря Base SQLAlchemy поймёт, что это ORM-модель.
+
+⸻
+
+Что тебе нужно заменить прямо сейчас
+
+В коде есть строка:
+
+YOUR_PASSWORD
+
+Ты должен подставить туда свой реальный пароль.
+
+Но есть нюанс.
+
+Для черновика
+
+можно временно подставить пароль прямо в строку.
+
+Для нормального проекта
+
+позже мы вынесем это в .env и config.py.
+
+Сейчас цель — понять механику, а не сделать идеальную конфигурацию.
+
+⸻
+
+Отлично. Тогда продолжаем в таком же режиме: спокойно, подробно, по одной вещи за раз.
+
+⸻
+
+Что такое ORM-модели
+
+Очень короткая суть
+
+ORM-модель — это Python-класс, который представляет таблицу из базы данных.
+
+То есть:
+ • в БД у тебя есть таблица users
+ • в Python у тебя будет класс User
+
+И этот класс будет описывать:
+ • как называется таблица
+ • какие у неё колонки
+ • какие у колонок типы
+
+⸻
+
+Расшифровка ORM
+
+ORM = Object-Relational Mapping
+
+Разберём это слово по частям.
+
+1. Object
+
+Объект — это объект Python, то есть экземпляр класса.
+
+Например:
+
+user = User()
+
+⸻
+
+1. Relational
+
+Relational — это реляционная база данных.
+
+То есть:
+ • PostgreSQL
+ • MySQL
+ • SQLite
+
+У тебя сейчас — PostgreSQL
+
+⸻
+
+1. Mapping
+
+Mapping — это “сопоставление”.
+
+То есть ORM делает вот такое сопоставление:
+
+База данных Python
+таблица класс
+строка таблицы объект
+колонка атрибут класса
+
+⸻
+
+Живой пример
+
+Допустим, в базе есть таблица:
+
+CREATE TABLE users (
+    id BIGSERIAL PRIMARY KEY,
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL
+);
+
+С ORM это будет выглядеть примерно так:
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(BigInteger, primary_key=True)
+    email = Column(Text, nullable=False)
+    password_hash = Column(Text, nullable=False)
+
+⸻
+
+Что это значит
+
+Когда ты пишешь такой класс, ты по сути говоришь SQLAlchemy:
+
+Вот таблица users.
+У неё есть поля id, email, password_hash.
+Работай с ней через этот Python-класс.
+
+⸻
+
+Почему это удобно
+
+Без ORM тебе пришлось бы постоянно писать SQL руками:
+
+SELECT * FROM users WHERE email = '<test@mail.com>';
+
+С ORM ты можешь работать через Python-объекты и методы.
+
+То есть думать не так:
+
+“Напиши SQL-запрос”
+
+а так:
+
+“Найди мне пользователя по email”
+
+⸻
+
+Ещё проще: аналогия
+
+Представь, что база данных говорит на языке SQL,
+а ты пишешь приложение на Python.
+
+ORM — это переводчик между ними
+
+Он позволяет тебе описать таблицы языком Python-классов.
+
+⸻
+
+Как это выглядит в голове
+
+⸻
+
+В базе данных
+
+Есть таблица:
+
+users
+
+В ней строки:
+
+1 | <user1@mail.com> | hash1
+2 | <user2@mail.com> | hash2
+
+⸻
+
+В Python через ORM
+
+Это можно представить как объекты:
+
+user1.id = 1
+user1.email = "<user1@mail.com>"
+user1.password_hash = "hash1"
+
+⸻
+
+Самая важная мысль
+
+ORM-модель — это не просто класс
+
+Это специальный класс, который связан с таблицей БД.
+
+Обычный класс Python:
+
+class Dog:
+    pass
+
+ничего не знает о PostgreSQL.
+
+А ORM-модель:
+
+class User(Base):
+    ...
+
+знает, что она связана с таблицей.
+
+Почему?
+
+Потому что она наследуется от Base.
+
+⸻
+
+Вот зачем нам был нужен Base
+
+В database.py ты написал:
+
+Base = declarative_base()
+
+Это был подготовительный шаг.
+
+Теперь любой класс, который наследуется от Base, будет восприниматься SQLAlchemy как ORM-модель.
+
+Пример:
+
+class Family(Base):
+    ...
+
+SQLAlchemy понимает:
+
+Ага, это описание таблицы.
+
+⸻
+
+Связь с твоим проектом
+
+У тебя уже есть таблицы на уровне SQL:
+ • families
+ • users
+ • refresh_tokens
+ • password_reset_tokens
+ • audit_logs
+
+Теперь для каждой такой таблицы мы создадим ORM-модель:
+ • Family
+ • User
+ • RefreshToken
+ • PasswordResetToken
+ • AuditLog
+
+⸻
+
+Как будет выглядеть соответствие
+
+SQL-таблица ORM-модель
+families Family
+users User
+refresh_tokens RefreshToken
+password_reset_tokens PasswordResetToken
+audit_logs AuditLog
+
+⸻
+
+Что будет внутри ORM-модели
+
+Внутри модели ты описываешь:
+
+1. Имя таблицы
+
+Например:
+
+__tablename__ = "families"
+
+⸻
+
+1. Колонки
+
+Например:
+
+id = Column(BigInteger, primary_key=True)
+name = Column(Text, nullable=False)
+
+⸻
+
+1. Иногда связи
+
+Позже можно описывать связи между таблицами, но сейчас мы в это не идём.
+
+⸻
+
+Что мы получаем в итоге
+
+Когда модель написана, ты можешь:
+ • создавать объект как Python-объект
+ • сохранять его в БД
+ • читать строки из БД как объекты Python
+
+⸻
+
+Очень важное различие
+
+SQL-схема
+
+Это описание таблиц на языке SQL
+
+ORM-модели
+
+Это описание тех же таблиц на языке Python
+
+То есть ты сейчас не создаёшь “другую базу”.
+Ты просто делаешь Python-представление уже утверждённой БД.
+
+⸻
+
+Пример в твоей логике
+
+У тебя есть SQL:
+
+CREATE TABLE IF NOT EXISTS families (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_by BIGINT
+);
+
+Теперь ты сделаешь ORM-модель, которая отражает это в Python.
+
+⸻
+
+Что мы будем делать следующим шагом
+
+Теперь, когда ты понимаешь идею ORM-модели, мы можем перейти к самой простой модели:
+
+family.py
+
+Она удобна для старта, потому что там:
+ • мало полей
+ • нет сложного ENUM
+ • нет JSONB
+ • нет внешнего ключа
+
+⸻
+
+Твоя текущая опора
+
+Ты уже сделал database.py.
+Это фундамент.
+
+Теперь следующий шаг:
+
+сделать первую ORM-модель Family
+
+
+# END FILE CONTENTS
+
+
+# File: config.py
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+secret_key = os.getenv("SECRET_KEY")
+
+if not secret_key:
+    raise ValueError("Переменная окружения SECRET_KEY не задана")
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/password_reset_token.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class PasswordResetToken(Base):
+    """EN: ORM model for the ``password_reset_tokens`` table.
+
+    This model represents one-time password reset tokens
+    that can expire and can later be marked as used.
+
+    RU: ORM-модель таблицы ``password_reset_tokens``.
+
+    Эта модель описывает одноразовые токены сброса пароля,
+    которые могут истечь и позже быть помечены как использованные.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    token_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/refresh_token.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.dialects.postgresql import INET
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class RefreshToken(Base):
+    """EN: ORM model for the ``refresh_tokens`` table.
+
+    It keeps long-lived refresh token records that can later be revoked,
+    checked for expiration, and linked back to a specific user.
+
+    RU: ORM-модель таблицы ``refresh_tokens``.
+
+    Она хранит записи о долгоживущих refresh token,
+    которые потом можно отзывать, проверять на истечение
+    и связывать с конкретным пользователем.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Это хорошая привычка из области безопасности:
+    # если по дизайну в БД должен жить только hash, то сам "сырой" refresh token
+    # лучше вообще не хранить в таблице.
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # В PostgreSQL есть специальный тип ``INET`` для IP-адресов.
+    # Он выразительнее, чем просто хранить адрес как обычный текст.
+    ip_address: Mapped[str | None] = mapped_column(INET)
+
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+
+# END FILE CONTENTS
+
+
+# File: .gptree_config
+
+# GPTree Local Config
+version: 2
+
+# Whether to use .gitignore
+useGitIgnore: true
+# File types to include (e.g., .py,.js)
+includeFileTypes: *
+# File types to exclude when includeFileTypes is '*'
+excludeFileTypes: 
+# Output file name
+outputFile: gptree_output.txt
+# Whether to output the file locally or relative to the project directory
+outputFileLocally: true
+# Whether to copy the output to the clipboard
+copyToClipboard: false
+# Whether to use safe mode (prevent overly large files from being combined)
+safeMode: true
+# Whether to store the files chosen in the config file (--save, -s)
+storeFilesChosen: true
+# Whether to include line numbers in the output (--line-numbers, -n)
+lineNumbers: false
+# Whether to show ignored files in the directory tree
+showIgnoredInTree: false
+# Whether to show only default ignored files in the directory tree while still respecting gitignore
+showDefaultIgnoredInTree: false
+# Previously selected files (when using the -s or --save flag previously)
+previousFiles: 
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/__init__.py
+
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/user_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.user import User, UserRole
+
+
+class UserRepository:
+    """EN: Repository responsible for reading and writing ``users`` table data.
+
+    The main idea is simple: SQLAlchemy query details live here,
+    while business decisions should stay in services.
+
+    RU: Репозиторий, который отвечает за чтение и запись данных таблицы ``users``.
+
+    Основная идея простая: детали SQLAlchemy-запросов живут здесь,
+    а бизнес-решения должны оставаться в сервисном слое.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Accept the active SQLAlchemy session for this repository.
+
+        Every method will use the same session object passed from outside.
+
+        Args:
+            db: Active SQLAlchemy session shared by repository methods.
+
+        RU: Принимает активную SQLAlchemy-сессию для этого репозитория.
+
+        Каждый метод дальше будет работать через один и тот же объект Session,
+        который передан снаружи.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия, общая для методов репозитория.
+        """
+
+        self.db = db
+
+    def get_user_by_email(self, email: str) -> User | None:
+        """EN: Find a user by email and return ``User`` or ``None``.
+
+        This is a common lookup for authentication flows,
+        because email usually acts as a unique identifier.
+
+        Args:
+            email: Email value used to search in the ``users`` table.
+
+        Returns:
+            Matching ``User`` object or ``None``.
+
+        RU: Ищет пользователя по email и возвращает ``User`` или ``None``.
+
+        Это типичный запрос для сценариев аутентификации,
+        потому что email обычно выступает уникальным идентификатором.
+
+        Аргументы:
+            email: значение email, по которому ищется запись в таблице ``users``.
+
+        Возвращает:
+            Найденный объект ``User`` или ``None``.
+        """
+
+        return self.db.query(User).filter(User.email == email).first()
+    
+
+    def get_user_by_id(self, id: int) -> User | None:
+        """EN: Return a user by primary key or ``None`` if it does not exist.
+
+        Args:
+            id: User identifier from the ``users`` table.
+
+        Returns:
+            Matching ``User`` object or ``None``.
+
+        RU: Возвращает пользователя по первичному ключу или ``None``, если записи нет.
+
+        Аргументы:
+            id: идентификатор пользователя из таблицы ``users``.
+
+        Возвращает:
+            Найденный объект ``User`` или ``None``.
+        """
+
+        return self.db.query(User).filter(User.id == id).first()
+
+
+    def create_user(
+        self,
+        email: str,
+        password_hash: str,
+        role: UserRole,
+        family_id: int,
+    ) -> User:
+        """EN: Create a new user, commit it, and return the saved ORM object.
+
+        The method prepares a ``User`` instance, adds it to the session,
+        commits the transaction, and then refreshes the object from the database.
+
+        Args:
+            email: User email.
+            password_hash: Already prepared password hash, not a raw password.
+            role: Role value from ``UserRole`` enum.
+            family_id: Identifier of the family this user belongs to.
+
+        Returns:
+            Saved ``User`` ORM object.
+
+        RU: Создаёт нового пользователя, делает commit и возвращает сохранённый ORM-объект.
+
+        Метод собирает экземпляр ``User``, добавляет его в сессию,
+        фиксирует транзакцию, а затем обновляет объект данными из базы.
+
+        Аргументы:
+            email: email пользователя.
+            password_hash: уже подготовленный хеш пароля, а не сырой пароль.
+            role: значение роли из enum ``UserRole``.
+            family_id: идентификатор семьи, к которой относится пользователь.
+
+        Возвращает:
+            Сохранённый ORM-объект ``User``.
+        """
+
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            role=role,
+            is_active=True,
+            family_id=family_id,
+        )
+
+        self.db.add(user)
+        self.db.commit()
+        # ``commit`` фиксирует транзакцию, но именно ``refresh`` помогает
+        # объекту в памяти Python догнать итоговое состояние записи в базе.
+        self.db.refresh(user)
+
+        return user
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/family.py
+
+from sqlalchemy import BigInteger, DateTime, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+from app.core.database import Base
+
+
+class Family(Base):
+    """EN: ORM model for the ``families`` table.
+
+    This class describes how a family group is represented in Python code
+    and how that representation maps to the database table.
+
+    RU: ORM-модель таблицы ``families``.
+
+    Этот класс показывает, как семейная группа выглядит в Python-коде
+    и как это описание связывается с одноимённой таблицей в базе данных.
+    """
+
+    __tablename__ = "families"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Важная учебная деталь: время тут заполняет не Python-код.
+    # Его подставляет сама база данных, а это часто надёжнее и делает БД
+    # единым источником правды для технических временных меток.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    # На этом этапе ``created_by`` хранится просто как числовое поле.
+    # То есть мы уже сохраняем идею "кто создал семью",
+    # но пока не заставляем SQLAlchemy оформлять это как внешний ключ.
+    created_by: Mapped[int] = mapped_column(BigInteger)
+
+
+# END FILE CONTENTS
+
+
+# File: backend/requirements.txt
+
+pip install 'pwdlib[bcrypt]'
+pip install 'pwdlib[argon2]'
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/audit_log.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class AuditLog(Base):
+    """EN: ORM model for the ``audit_logs`` table.
+
+    Audit logs are useful because they preserve a history of security-related
+    actions even when the main business objects later change or disappear.
+
+    RU: ORM-модель таблицы ``audit_logs``.
+
+    Журнал аудита полезен тем, что сохраняет историю событий безопасности,
+    даже если основные бизнес-объекты позже изменятся или будут удалены.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        # Это осознанно "бережный" вариант:
+        # если пользователь исчезнет, след аудита всё равно должен выжить.
+        # Поэтому запись журнала остаётся, а прямой идентификатор просто станет NULL.
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+
+    ip_address: Mapped[str | None] = mapped_column(INET)
+
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # ``details`` - это место, где журнал может хранить дополнительный контекст,
+    # не заставляя нас создавать отдельную SQL-колонку под каждую мелочь.
+    # Для такой гибкой метаинформации JSONB очень удобен.
+    details: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+
+# END FILE CONTENTS
+
+
+# File: README.md
+
+# 🧠 Home Secretary
+
+---
+
+## 🇬🇧 ENGLISH VERSION
+
+### Overview
+
+Home Secretary is a self-hosted web platform for personal and family organization.
+
+It combines multiple domains into a single system:
+
+- task management (todo)
+- calendar planning
+- household finance tracking
+- document storage with metadata
+- notifications (Matrix, web push)
+
+The system is designed to run on a private server and be accessible via the internet for multiple users.
+
+---
+
+### Goals
+
+The main goal is to build a unified digital environment for managing everyday life:
+
+- track tasks and deadlines
+- plan events
+- manage household finances
+- store and search documents
+- receive reminders and alerts
+
+---
+
+### Core Principles
+
+- modular monolith architecture
+- self-hosted deployment
+- multi-user support
+- family-oriented model
+- security-first approach
+- Docker-based infrastructure
+- PostgreSQL as primary database
+
+---
+
+### Architecture
+
+The system follows a modular monolith design:
+
+Core modules:
+
+- authentication
+- users
+- families
+- roles and permissions
+- audit logs
+
+Business modules:
+
+- tasks
+- calendar
+- finance
+- documents
+
+Infrastructure:
+
+- PostgreSQL
+- file storage
+- Matrix notifications
+- web push notifications
+- reverse proxy (HTTPS)
+- backup system
+
+---
+
+### Roles
+
+- admin — manages family-level settings and access
+- user — manages personal and shared data
+
+---
+
+### Authentication
+
+Authentication is based on JWT.
+
+Flow:
+
+- register with email/password
+- login
+- receive access and refresh tokens
+- refresh access token
+- logout
+
+At MVP stage:
+
+- no email confirmation
+- no 2FA
+- password reset supported
+
+---
+
+### Storage
+
+- PostgreSQL — structured data
+- filesystem — uploaded files
+- metadata stored in DB
+
+---
+
+### Clients
+
+- desktop browser
+- mobile browser
+
+---
+
+### Roadmap
+
+Stage 0 — Project foundation  
+Stage 1 — Auth + Users + Families  
+Stage 2 — Organizer / Todo  
+Stage 3 — Calendar  
+Stage 4 — Finance  
+Stage 5 — Documents  
+Stage 6 — Notifications  
+Stage 7 — Security hardening  
+
+---
+
+### Deployment
+
+The system runs in Docker containers:
+
+- backend (FastAPI)
+- PostgreSQL
+- reverse proxy
+- persistent storage for files
+- backup service
+
+---
+
+### Security Notes
+
+This system handles sensitive data:
+
+- personal information
+- financial data
+- documents
+
+Required measures:
+
+- password hashing
+- secure token handling
+- HTTPS
+- access control
+- audit logging
+- backup strategy
+
+---
+
+### Status
+
+Project is currently in architecture and planning phase.  
+Implementation starts with Stage 0 and Stage 1.
+
+---
+
+## 🇷🇺 РУССКАЯ ВЕРСИЯ
+
+### Обзор
+
+Home Secretary — это self-hosted веб-платформа для организации личной и семейной жизни.
+
+Система объединяет:
+
+- список дел (todo)
+- календарь
+- домашнюю бухгалтерию
+- хранение документов с метаданными
+- систему уведомлений (Matrix, web push)
+
+Проект предназначен для запуска на собственном сервере с доступом через интернет для нескольких пользователей.
+
+---
+
+### Цели проекта
+
+Создать единое цифровое пространство для управления повседневной жизнью:
+
+- контроль задач и дедлайнов
+- планирование событий
+- учёт финансов
+- хранение документов
+- получение напоминаний
+
+---
+
+### Основные принципы
+
+- модульный монолит
+- self-hosted архитектура
+- многопользовательская система
+- семейная модель доступа
+- безопасность как базовый принцип
+- Docker-инфраструктура
+- PostgreSQL как основная БД
+
+---
+
+### Архитектура
+
+Система построена как модульный монолит.
+
+Ядро:
+
+- аутентификация
+- пользователи
+- семьи
+- роли и права доступа
+- журналирование действий
+
+Бизнес-модули:
+
+- задачи
+- календарь
+- финансы
+- документы
+
+Инфраструктура:
+
+- PostgreSQL
+- файловое хранилище
+- уведомления через Matrix
+- web push
+- reverse proxy (HTTPS)
+- система резервного копирования
+
+---
+
+### Роли
+
+- admin — управление семьёй и доступами
+- user — работа с личными и общими данными
+
+---
+
+### Аутентификация
+
+Используется JWT.
+
+Сценарий:
+
+- регистрация (email + пароль)
+- вход
+- получение access и refresh токенов
+- обновление токена
+- logout
+
+На этапе MVP:
+
+- без подтверждения email
+- без 2FA
+- восстановление пароля есть
+
+---
+
+### Хранение данных
+
+- PostgreSQL — структурированные данные
+- файловая система — документы
+- метаданные — в БД
+
+---
+
+### Клиенты
+
+- браузер (ПК)
+- браузер (мобильный)
+
+---
+
+### Roadmap
+
+Этап 0 — Подготовка проекта  
+Этап 1 — Auth + Users + Families  
+Этап 2 — Органайзер  
+Этап 3 — Календарь  
+Этап 4 — Финансы  
+Этап 5 — Документы  
+Этап 6 — Уведомления  
+Этап 7 — Усиление безопасности  
+
+---
+
+### Развёртывание
+
+Система работает в Docker:
+
+- backend (FastAPI)
+- PostgreSQL
+- reverse proxy
+- файловое хранилище
+- сервис резервного копирования
+
+---
+
+### Безопасность
+
+Система работает с чувствительными данными:
+
+- личные данные
+- финансы
+- документы
+
+Обязательные меры:
+
+- хеширование паролей
+- контроль токенов
+- HTTPS
+- контроль доступа
+- журналирование
+- резервное копирование
+
+---
+
+### Статус
+
+Проект находится на этапе проектирования архитектуры.  
+Реализация начинается с этапов 0 и 1.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/family_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.family import Family
+
+
+class FamilyRepository:
+    """EN: Repository for working with ``families`` table data.
+
+    The repository isolates database access logic so higher layers
+    do not have to build ORM queries directly.
+
+    RU: Репозиторий для работы с данными таблицы ``families``.
+
+    Репозиторий изолирует доступ к базе данных,
+    чтобы верхним слоям не приходилось писать ORM-запросы напрямую.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Store the active SQLAlchemy session inside the repository.
+
+        The repository will reuse this session in all its methods.
+
+        Args:
+            db: SQLAlchemy Session object used for queries, inserts, commits,
+                and refreshing ORM entities inside this repository.
+
+        RU: Сохраняет активную SQLAlchemy-сессию внутри репозитория.
+
+        Дальше все методы этого репозитория будут работать через неё.
+
+        Аргументы:
+            db: объект Session от SQLAlchemy, через который репозиторий
+                выполняет запросы, добавляет записи, делает commit
+                и обновляет ORM-объекты.
+        """
+
+        self.db = db
+
+    def get_family_by_name(self, name: str) -> Family | None:
+        """EN: Return the first family found by name or ``None``.
+
+        This method is useful when the caller wants one object
+        and is okay with getting nothing if no match exists.
+
+        Args:
+            name: Family name used in the filter condition.
+
+        Returns:
+            The first matching ``Family`` object or ``None``.
+
+        RU: Возвращает первую найденную семью по имени или ``None``.
+
+        Такой метод удобен, когда вызывающему коду нужен один объект
+        и нормально, если при отсутствии совпадения вернётся пустой результат.
+
+        Аргументы:
+            name: имя семьи, по которому строится фильтр.
+
+        Возвращает:
+            Первый найденный объект ``Family`` или ``None``.
+        """
+
+        return self.db.query(Family).filter(Family.name == name).first()
+
+    def create_family(self, name: str) -> Family:
+        """EN: Create a new family row, commit the transaction, and return it.
+
+        After commit the method refreshes the ORM object
+        so generated values from the database become available in Python.
+
+        Args:
+            name: Family name that will be written into the new row.
+
+        Returns:
+            Saved ``Family`` ORM object.
+
+        RU: Создаёт новую запись семьи, фиксирует транзакцию и возвращает объект.
+
+        После commit метод обновляет ORM-объект,
+        чтобы значения, сгенерированные базой данных, были доступны в Python.
+
+        Аргументы:
+            name: имя семьи, которое будет записано в новую строку.
+
+        Возвращает:
+            Сохранённый ORM-объект ``Family``.
+        """
+
+        family = Family(name=name)
+
+        self.db.add(family)
+        self.db.commit()
+        # ``refresh`` - это один из тех маленьких, но важных ORM-моментов:
+        # после commit мы просим SQLAlchemy заново подтянуть данные из базы,
+        # например сгенерированный первичный ключ.
+        self.db.refresh(family)
+
+        return family
+
+
+# END FILE CONTENTS
+
+
+# File: Technical Specification_1.md
+
+Хорошо. Тогда только первый подшаг.
+Без прыжков дальше.
+
+Подшаг 1 — database.py + models/*
+
+Цель подшага
+
+Подготовить базу для ORM-части backend:
+ • подключение к PostgreSQL
+ • базовый класс моделей
+ • ORM-модели для таблиц:
+ • families
+ • users
+ • refresh_tokens
+ • password_reset_tokens
+ • audit_logs
+
+На этом шаге не должно быть:
+ • endpoint’ов
+ • сервисов
+ • auth-логики
+ • JWT
+ • хеширования
+ • repository-слоя
+
+Только инфраструктура БД и модели.
+
+⸻
+
+1. Что должно получиться в конце
+
+После завершения этого подшага у тебя должны быть файлы:
+
+backend/app/core/database.py
+backend/app/models/family.py
+backend/app/models/user.py
+backend/app/models/refresh_token.py
+backend/app/models/password_reset_token.py
+backend/app/models/audit_log.py
+
+И дополнительно очень желательно:
+
+backend/app/models/__init__.py
+
+⸻
+
+1. Задача файла database.py
+
+Файл должен решать 3 вещи:
+
+2.1. Создать базовый класс моделей
+
+Это будет общий Base, от которого наследуются все ORM-модели.
+
+⸻
+
+2.2. Создать подключение к БД
+
+Нужно описать:
+ • engine
+ • фабрику сессий
+ • функцию/механизм получения сессии
+
+⸻
+
+2.3. Быть центральной точкой для ORM
+
+Все модели должны опираться на этот файл, а не создавать подключение каждая сама по себе.
+
+⸻
+
+1. Что должно быть в database.py концептуально
+
+Без готового кода, но по смыслу там должны быть такие элементы:
+
+3.1. Импорт SQLAlchemy
+
+Ты будешь использовать ORM, значит там должны быть импорты для:
+ • engine
+ • sessionmaker
+ • declarative base
+
+⸻
+
+3.2. DATABASE_URL
+
+Строка подключения должна браться из конфигурации, а не быть захардкоженной прямо в файле.
+
+Но на первом черновике, если у тебя ещё нет config.py, допустимо временно сделать напрямую переменную подключения.
+
+Важно
+
+Это временное упрощение. Потом вынесешь в config.py.
+
+⸻
+
+3.3. Engine
+
+Должен быть объект подключения к PostgreSQL.
+
+⸻
+
+3.4. Session factory
+
+Должна быть фабрика сессий, через которую потом будут работать repository.
+
+⸻
+
+3.5. Base
+
+Должен быть базовый класс для моделей.
+
+⸻
+
+1. Задача моделей
+
+Каждая модель должна отражать уже утверждённую SQL-схему.
+
+То есть сейчас ты не придумываешь заново БД, а переносишь её в SQLAlchemy ORM.
+
+⸻
+
+1. Что должно быть в каждой модели
+
+Для каждой модели ты должен задать:
+ • имя таблицы
+ • поля
+ • типы
+ • primary key
+ • nullable
+ • unique
+ • default
+ • foreign key, где нужно
+
+⸻
+
+1. Перечень моделей и что в них должно быть
+
+⸻
+
+6.1. family.py
+
+Модель таблицы families
+
+Поля:
+ • id
+ • name
+ • created_at
+ • created_by
+
+Важно
+
+created_by пока без внешнего ключа, как в утверждённой схеме.
+
+⸻
+
+6.2. user.py
+
+Модель таблицы users
+
+Поля:
+ • id
+ • email
+ • password_hash
+ • role
+ • is_active
+ • family_id
+ • created_at
+ • updated_at
+
+Важно
+
+Нужно аккуратно отразить role как ENUM на стороне ORM.
+
+⸻
+
+6.3. refresh_token.py
+
+Модель таблицы refresh_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • revoked_at
+ • created_at
+ • ip_address
+ • user_agent
+
+⸻
+
+6.4. password_reset_token.py
+
+Модель таблицы password_reset_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • used_at
+ • created_at
+
+⸻
+
+6.5. audit_log.py
+
+Модель таблицы audit_logs
+
+Поля:
+ • id
+ • user_id
+ • event_type
+ • ip_address
+ • user_agent
+ • created_at
+ • details
+
+Важно
+
+details должен быть JSON/JSONB-совместимым типом на стороне PostgreSQL.
+
+⸻
+
+1. Что пока можно НЕ делать
+
+На этом шаге не обязательно делать:
+ • relationship между моделями
+ • back_populates
+ • каскады ORM-уровня
+ • mixin-классы
+ • автоматическое обновление updated_at
+ • Alembic
+ • Pydantic-схемы
+
+Почему
+
+Сейчас задача — правильно завести модели, а не сделать идеальный enterprise ORM.
+
+⸻
+
+1. Что я буду проверять в твоём коде
+
+Когда ты пришлёшь этот подшаг, я буду смотреть на:
+
+8.1. Архитектуру
+ • нет ли подключения к БД в моделях
+ • нет ли смешивания разных слоёв
+
+8.2. Соответствие SQL-схеме
+ • совпадают ли типы
+ • совпадают ли имена таблиц
+ • нет ли лишних полей
+
+8.3. Чистоту ORM
+ • корректно ли задан Base
+ • корректно ли задан engine/session
+ • корректно ли описан ENUM
+ • корректно ли описан JSON/INET/DateTime
+
+⸻
+
+1. Практические правила для этого шага
+
+Правило 1
+
+Одна модель — один файл.
+
+Правило 2
+
+Не писать всю логику в database.py.
+
+Правило 3
+
+Не делать пока repository.
+
+Правило 4
+
+Не писать пока endpoint’ы.
+
+Правило 5
+
+Если сомневаешься в типе ORM — лучше спросить или показать черновик.
+
+⸻
+
+1. Критерий готовности подшага
+
+Подшаг считается выполненным, если:
+ 1. database.py создан
+ 2. все 5 ORM-моделей созданы
+ 3. модели отражают SQL-схему
+ 4. код структурно чистый
+ 5. нет перемешивания слоёв приложения
+
+⸻
+
+1. Что делать тебе сейчас
+
+Твоя задача:
+ 1. написать core/database.py
+ 2. написать все файлы в models/
+ 3. прислать мне их на проверку
+
+Лучше присылать:
+ • сначала database.py
+ • потом модели одним сообщением или частями
+
+Так будет проще проверить без каши.
+
+Начинай с database.py.
+
+
+# END FILE CONTENTS

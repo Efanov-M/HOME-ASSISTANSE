@@ -4,11 +4,13 @@ import jwt
 import secrets
 import string
 import hashlib
-from config import secret_key as SECRET_KEY
+from typing import Any
 
+from config import SECRET_KEY, ACCESS_TOKEN_EXPIRE_MINUTES
 
+pass_hash = PasswordHash.recommended()
 
-def validation_password(password: str):
+def validation_password(password: str) -> str:
     """EN: Validate a raw password against the current password policy.
 
     The function trims outer whitespace and checks basic strength rules:
@@ -40,18 +42,24 @@ def validation_password(password: str):
         ValueError: Если пароль не проходит проверку по правилам.
     """
 
+
     password = password.strip()
+
     if len(password) < 8:
-        raise ValueError ('Пароль слишком короткий')
+        raise ValueError("Пароль слишком короткий")
+
     if not any(x in password for x in "@`~!?$#*&^()"):
-        raise ValueError('Пароль должен содержать спецсимвол')
+        raise ValueError("Пароль должен содержать спецсимвол")
+
     if not any(char.isupper() for char in password):
         raise ValueError("Пароль должен содержать хотя бы одну заглавную букву")
+
     if not any(char.isdigit() for char in password):
         raise ValueError("Пароль должен содержать цифры")
+
     return password
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
     """EN: Validate a password and return its secure hash representation.
 
     Args:
@@ -69,12 +77,11 @@ def get_password_hash(password):
         Хеш пароля, созданный через ``pwdlib``.
     """
 
+    
     password = validation_password(password)
-    password_hash = PasswordHash.recommended()
-    hash_ = password_hash.hash(password)
-    return hash_
+    return pass_hash.hash(password)
 
-def verify_password(password,password_hash):
+def verify_password(password: str, password_hash: str) -> bool:
     """EN: Compare a raw password with a stored password hash.
 
     Args:
@@ -93,12 +100,14 @@ def verify_password(password,password_hash):
     Возвращает:
         ``True``, если пароль совпадает с хешем, иначе ``False``.
     """
+    try:
+        return pass_hash.verify(password, password_hash)
+    except Exception:
+        
+        return False
 
-    pass_hash = PasswordHash.recommended()
-    valid = pass_hash.verify(password, password_hash)
-    return valid
 
-def create_access_token(user_id,role):
+def create_access_token(user_id: int, role: Any) -> str:
     """EN: Create a short-lived JWT access token for the authenticated user.
 
     Args:
@@ -118,16 +127,18 @@ def create_access_token(user_id,role):
         Закодированную строку JWT access token.
     """
 
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-    payload = {
-    "user_id": user_id,
-    "role": role.value,
-    "exp": expires_at,
-}
-    secret_key = SECRET_KEY
+  
+    now = datetime.now(timezone.utc)
 
-    token = jwt.encode(payload, secret_key, algorithm="HS256")
-    return token
+    payload = {
+        "sub": str(user_id),        # стандарт JWT
+        "user_id": user_id,
+        "role": role.value,
+        "iat": now,                # когда выдан
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 
 def create_refresh_token():
@@ -143,13 +154,34 @@ def create_refresh_token():
     """
 
     alphabet = string.ascii_letters + string.digits
-    refresh_token = ''.join(secrets.choice(alphabet) for i in range(20))
-    
-    return refresh_token
+    return "".join(secrets.choice(alphabet) for _ in range(40))
 
 
+def create_reset_token() -> str:
+    """EN: Generate a one-time password reset token string.
 
-def hash_token(token):
+    The current implementation intentionally reuses the same random generation
+    strategy as refresh tokens, but keeps a separate function so reset-token
+    logic can evolve independently later.
+
+    Returns:
+        Random reset token string.
+
+    RU: Генерирует одноразовый токен для сброса пароля.
+
+    Текущая реализация специально использует тот же способ генерации случайной строки,
+    что и refresh token, но вынесена в отдельную функцию, чтобы дальше логику
+    reset token можно было развивать независимо.
+
+    Возвращает:
+        Случайную строку reset token.
+    """
+
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(40))
+
+
+def hash_token(token: str) -> str:
     """EN: Return the SHA-256 hash of a token string.
 
     Args:
@@ -169,3 +201,44 @@ def hash_token(token):
 
     return hashlib.sha256(token.encode()).hexdigest()
 
+def decode_access_token(token: str) -> dict[str, Any]:
+    """EN: Decode and validate a JWT access token.
+
+    Args:
+        token: Encoded JWT access token string.
+
+    Returns:
+        Decoded payload dictionary.
+
+    Raises:
+        ValueError: If the token is expired, invalid, or has an unexpected payload.
+
+    RU: Декодирует и валидирует JWT access token.
+
+    Аргументы:
+        token: закодированная строка JWT access token.
+
+    Возвращает:
+        Словарь с декодированным payload.
+
+    Исключения:
+        ValueError: Если токен истёк, повреждён или содержит некорректный payload.
+    """
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        # токен истёк
+        raise ValueError("Токен истёк")
+    except jwt.InvalidTokenError:
+        # любая другая ошибка JWT (подделка, мусор и т.д.)
+        raise ValueError("Неверный токен")
+
+    # дополнительная проверка содержимого
+    if "user_id" not in payload or "role" not in payload:
+        raise ValueError("Некорректный payload")
+
+    return payload
+    
+    
+     

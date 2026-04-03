@@ -1,11 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-
-
-# Это временное упрощение для учебного этапа.
-# Пока строка подключения лежит прямо здесь, чтобы вся базовая настройка БД
-# была видна в одном месте и не расползалась по нескольким файлам слишком рано.
-DATABASE_URL = "postgresql+psycopg://home_secretary:YOUR_PASSWORD@localhost:5432/home_secretary"
+from config import DATABASE_URL
 
 
 # Представь engine как "технический вход" в PostgreSQL:
@@ -26,3 +21,33 @@ SessionLocal = sessionmaker(
 # Как только класс наследуется от Base, SQLAlchemy начинает воспринимать его
 # как часть declarative-подхода и ждёт, что внутри будет описание таблицы.
 Base = declarative_base()
+
+def get_db():
+    """This function:
+    1. creates a new SQLAlchemy Session,
+    2. yields it to the caller (e.g. FastAPI dependency),
+    3. guarantees that the session is closed after use.
+
+    RU: Предоставляет сессию базы данных на время выполнения запроса.
+
+    Функция:
+    1. создаёт новую Session,
+    2. отдаёт её наружу (например, в endpoint или сервис),
+    3. гарантированно закрывает соединение после завершения работы.
+    """
+
+    # 1. создаём новую сессию через фабрику SessionLocal
+    # каждая сессия — это отдельное подключение/контекст работы с БД
+    db = SessionLocal()
+
+    try:
+        # 2. отдаём сессию наружу
+        # здесь выполнение "приостанавливается", и код, который вызвал get_db(),
+        # получает доступ к db (Session)
+        yield db
+
+    finally:
+        # 3. этот блок выполнится ВСЕГДА
+        # даже если внутри запроса произошла ошибка
+        # закрываем соединение с БД, чтобы не было утечек
+        db.close()
