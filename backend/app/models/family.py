@@ -20,14 +20,12 @@ class Family(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    # Важная учебная деталь: время тут заполняет не Python-код.
+    # время тут заполняет не Python-код.
     # Его подставляет сама база данных, а это часто надёжнее и делает БД
     # единым источником правды для технических временных меток.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
     )
-    # На этом этапе ``created_by`` хранится просто как числовое поле.
-    # То есть мы уже сохраняем идею "кто создал семью",
-    # но пока не заставляем SQLAlchemy оформлять это как внешний ключ.
+   
     created_by: Mapped[int] = mapped_column(BigInteger)

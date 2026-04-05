@@ -39,19 +39,13 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    # Это очень полезный учебный приём:
-    # вместо того чтобы везде доверять "обычным строкам", мы заворачиваем роль в Enum.
-    # Так сама модель подсказывает, какие значения вообще допустимы.
+    
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
-    # Обрати внимание на отличие от ``server_default``:
-    # ``default=True`` срабатывает на стороне Python/ORM в момент создания объекта.
-    # То есть значение появляется ещё до того, как INSERT уйдёт в базу.
+
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     family_id: Mapped[int] = mapped_column(
         BigInteger,
-        # ``ondelete="CASCADE"`` - это не "магия Python".
-        # Это подсказка самой базе данных, что делать с зависимыми строками,
-        # если родительская запись family будет удалена.
+       
         ForeignKey("families.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -59,9 +53,7 @@ class User(Base):
         DateTime(timezone=True),
         server_default=func.now(),
     )
-    # Сейчас ``updated_at`` ведёт себя скорее как "поле с первоначальным временем":
-    # значение проставляется при INSERT, но автоматическое обновление при UPDATE
-    # ещё не настроено. Для раннего учебного этапа это обычное упрощение.
+    
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

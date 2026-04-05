@@ -30,7 +30,7 @@ class RefreshToken(Base):
         nullable=False,
     )
 
-    # Это хорошая привычка из области безопасности:
+    
     # если по дизайну в БД должен жить только hash, то сам "сырой" refresh token
     # лучше вообще не хранить в таблице.
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
