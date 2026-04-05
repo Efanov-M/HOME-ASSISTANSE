@@ -292,8 +292,6 @@ def validate_reset_token(db: Session, token_hash: str) -> PasswordResetToken:
     
     return token
 
-
-
 def validate_user_by_user_id(db: Session, user_id: int) -> User:
     """EN: Validate that a user exists and is active by user id.
 
