@@ -1,0 +1,27 @@
+# GPTree Local Config
+version: 2
+
+# Whether to use .gitignore
+useGitIgnore: true
+# File types to include (e.g., .py,.js)
+includeFileTypes: *
+# File types to exclude when includeFileTypes is '*'
+excludeFileTypes: 
+# Output file name
+outputFile: gptree_output.txt
+# Whether to output the file locally or relative to the project directory
+outputFileLocally: true
+# Whether to copy the output to the clipboard
+copyToClipboard: false
+# Whether to use safe mode (prevent overly large files from being combined)
+safeMode: true
+# Whether to store the files chosen in the config file (--save, -s)
+storeFilesChosen: true
+# Whether to include line numbers in the output (--line-numbers, -n)
+lineNumbers: false
+# Whether to show ignored files in the directory tree
+showIgnoredInTree: false
+# Whether to show only default ignored files in the directory tree while still respecting gitignore
+showDefaultIgnoredInTree: false
+# Previously selected files (when using the -s or --save flag previously)
+previousFiles: backend/app/repositories/audit_log_repository.py,backend/app/services/auth_service.py,backend/app/schemas/auth.py,backend/app/models/password_reset_token.py,backend/app/schemas/family.py,backend/main.py,README.md,Папка обучения/fast_api2.md,backend/app/repositories/refresh_token_repository.py,Technical Specification_2.md,backend/Dockerfile,Technical Specification_1.md,Папка обучения/3.md,.gptree_config,backend/app/models/family.py,roadmap.md,backend/app/repositories/family_repository.py,backend/app/core/database.py,backend/app/models/__init__.py,docker/docker-compose.yml,Папка обучения/2.md,backend/app/models/refresh_token.py,Папка обучения/1.md,Папка обучения/fast_api.md,errors.md,backend/app/core/config.py,backend/app/repositories/password_reset_repository.py,backend/app/api/auth.py,backend/app/repositories/user_repository.py,Папка обучения/fast_api3.md,backend/app/schemas/user.py,backend/app/core/security.py,backend/app/core/errors.py,backend/app/models/user.py,backend/requirements.txt,backend/app/models/audit_log.py

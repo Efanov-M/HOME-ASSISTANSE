@@ -1,0 +1,7773 @@
+# Project Directory Structure:
+.
+├── .gptree_config
+├── README.md
+├── Technical Specification_1.md
+├── Technical Specification_2.md
+├── backend/
+│   ├── Dockerfile
+│   ├── app/
+│   │   ├── api/
+│   │   │   └── auth.py
+│   │   ├── core/
+│   │   │   ├── config.py
+│   │   │   ├── database.py
+│   │   │   ├── errors.py
+│   │   │   └── security.py
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   ├── audit_log.py
+│   │   │   ├── family.py
+│   │   │   ├── password_reset_token.py
+│   │   │   ├── refresh_token.py
+│   │   │   └── user.py
+│   │   ├── modules/
+│   │   ├── repositories/
+│   │   │   ├── audit_log_repository.py
+│   │   │   ├── family_repository.py
+│   │   │   ├── password_reset_repository.py
+│   │   │   ├── refresh_token_repository.py
+│   │   │   └── user_repository.py
+│   │   ├── schemas/
+│   │   │   ├── auth.py
+│   │   │   ├── family.py
+│   │   │   └── user.py
+│   │   └── services/
+│   │       └── auth_service.py
+│   ├── main.py
+│   └── requirements.txt
+├── docker/
+│   ├── docker-compose.yml
+│   └── init/
+├── errors.md
+├── roadmap.md
+├── storage/
+│   └── uploads/
+└── Папка обучения/
+    ├── 1.md
+    ├── 2.md
+    ├── 3.md
+    ├── fast_api.md
+    ├── fast_api2.md
+    └── fast_api3.md
+
+# BEGIN FILE CONTENTS
+
+# File: backend/app/repositories/audit_log_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.audit_log import AuditLog
+
+
+class AuditLogRepository:
+    """EN: Repository for working with ``audit_logs`` records.
+
+    Audit repositories are often intentionally simple:
+    write a log entry and later read log history back.
+
+    RU: Репозиторий для работы с записями ``audit_logs``.
+
+    Репозитории аудита часто специально делают простыми:
+    записать событие в журнал и позже прочитать историю назад.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Accept the active session used for audit read/write operations.
+
+        Args:
+            db: Active SQLAlchemy session used to insert and read audit rows.
+
+        RU: Принимает активную сессию для операций записи и чтения аудита.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия для добавления и чтения записей аудита.
+        """
+
+        self.db = db
+
+    def create_audit_log(
+        self,
+        user_id: int | None,
+        event_type: str,
+        ip_address: str | None,
+        user_agent: str | None,
+        details: dict,
+    ) -> AuditLog:
+        """EN: Create a security audit entry and return the saved ORM object.
+
+        Args:
+            user_id: Related user identifier or ``None`` if the event is anonymous.
+            event_type: Short event name, for example login or logout.
+            ip_address: Client IP address if available.
+            user_agent: Client user-agent string if available.
+            details: Extra event metadata stored in JSONB.
+
+        Returns:
+            Saved ``AuditLog`` ORM object.
+
+        RU: Создаёт запись аудита безопасности и возвращает сохранённый ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор связанного пользователя или ``None``,
+                если событие анонимное.
+            event_type: короткое имя события, например login или logout.
+            ip_address: IP-адрес клиента, если он известен.
+            user_agent: строка User-Agent клиента, если она известна.
+            details: дополнительная метаинформация о событии, которая хранится в JSONB.
+
+        Возвращает:
+            Сохранённый ORM-объект ``AuditLog``.
+        """
+
+        audit_log = AuditLog(
+            user_id=user_id,
+            event_type=event_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details,
+        )
+
+        self.db.add(audit_log)
+       
+
+        return audit_log
+
+    def get_audit_logs_by_user_id(self, user_id: int) -> list[AuditLog]:
+        """EN: Return all audit log rows related to a specific user.
+
+        Args:
+            user_id: Identifier of the user whose audit history is requested.
+
+        Returns:
+            List of ``AuditLog`` objects.
+
+        RU: Возвращает все записи журнала аудита, связанные с конкретным пользователем.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чья история аудита запрашивается.
+
+        Возвращает:
+            Список объектов ``AuditLog``.
+        """
+
+        return (
+            self.db.query(AuditLog)
+            .filter(AuditLog.user_id == user_id)
+            .all()
+        )
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/services/auth_service.py
+
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from typing import Any, TypeVar, ParamSpec
+
+from sqlalchemy.orm import Session
+
+from app.core.config import RESET_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+from app.core.database import SessionLocal
+from app.models.password_reset_token import PasswordResetToken
+from app.models.refresh_token import RefreshToken
+from app.models.user import User, UserRole
+from app.models.family import Family
+from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.password_reset_repository import PasswordResetTokenRepository
+from app.repositories.family_repository import FamilyRepository
+from app.repositories.user_repository import UserRepository
+from app.repositories.refresh_token_repository import RefreshTokenRepository
+from app.core.security import (
+    create_access_token,
+    create_reset_token,
+    create_refresh_token,
+    get_password_hash,
+    hash_token,
+    verify_password,
+    decode_access_token,
+    validation_password
+)
+from app.core.errors import AuthError
+from app.core.errors import (
+    RefreshTokenNotFound,
+    RefreshTokenRevoked,
+    RefreshTokenExpired,
+    RefreshTokenNoExpiry,
+    RefreshUserBlocked,
+    RefreshUserNotFound,
+    AccessTokenNotFound,
+    AccessUserBlocked,
+    AccessUserNotFound,
+    ResetTokenNotFound,
+    ResetTokenUsed,
+    ResetTokenNoExpiry,
+    ResetTokenExpired
+)
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def transactional(func: Callable[P, R]) -> Callable[P, R]:
+    """EN: Wrap a service function in one database transaction.
+
+    The decorator commits when the wrapped function succeeds
+    and rolls back when any exception escapes.
+
+    Args:
+        func: Service function whose first positional argument is ``db``.
+
+    Returns:
+        Wrapped callable with transactional behavior.
+
+    RU: Оборачивает сервисную функцию в одну транзакцию базы данных.
+
+    Декоратор делает commit, если функция завершилась успешно,
+    и rollback, если наружу вышло любое исключение.
+
+    Аргументы:
+        func: сервисная функция, у которой первый позиционный аргумент — это ``db``.
+
+    Возвращает:
+        Обёрнутую функцию с транзакционным поведением.
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        """EN: Execute the wrapped service function inside one transaction.
+
+        RU: Выполняет обёрнутую сервисную функцию внутри одной транзакции.
+        """
+
+        db: Session = args[0]
+        try:
+            result = func(*args, **kwargs)
+            db.commit()
+            return result
+
+        except Exception:
+            db.rollback()
+            raise
+
+    return wrapper
+
+def write_audit_event_safely(
+    user_id: int | None,
+    event_type: str,
+    ip_address: str | None,
+    user_agent: str | None,
+    details: dict[str, Any],
+) -> None:
+    """EN: Persist an audit event in an isolated session.
+
+    This helper is intended for error-path logging, where we do not want
+    the main business rollback to erase the audit trail.
+
+    Args:
+        user_id: Related user identifier or ``None``.
+        event_type: Audit event type string.
+        ip_address: Client IP address if available.
+        user_agent: Client user-agent string if available.
+        details: Additional JSON-serializable details.
+
+    RU: Сохраняет audit-событие в отдельной независимой сессии.
+
+    Этот helper предназначен для логирования error-path сценариев,
+    когда мы не хотим, чтобы rollback основной бизнес-транзакции
+    стёр запись из аудита.
+
+    Аргументы:
+        user_id: идентификатор связанного пользователя или ``None``.
+        event_type: строка типа audit-события.
+        ip_address: IP-адрес клиента, если он известен.
+        user_agent: строка User-Agent клиента, если она известна.
+        details: дополнительный JSON-совместимый контекст.
+    """
+
+    audit_db: Session = SessionLocal()
+    try:
+        audit_repository = AuditLogRepository(audit_db)
+        audit_repository.create_audit_log(
+            user_id=user_id,
+            event_type=event_type,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details=details,
+        )
+        audit_db.commit()
+    except Exception:
+        audit_db.rollback()
+    finally:
+        audit_db.close()
+
+
+def get_current_user(db: Session, token: str, ip_address: str) -> User:
+    """EN: Resolve the current user from an access token.
+
+    Args:
+        db: Active database session.
+        token: Raw access token string.
+        ip_address: Client IP address for audit logging.
+
+    Returns:
+        Active authenticated ``User`` object.
+
+    Raises:
+        AuthError: If the token is invalid or the user is unavailable.
+
+    RU: Возвращает текущего пользователя по access token.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        token: сырая строка access token.
+        ip_address: IP-адрес клиента для записи в аудит.
+
+    Возвращает:
+        Активный аутентифицированный объект ``User``.
+
+    Исключения:
+        AuthError: Если токен невалиден или пользователь недоступен.
+    """
+
+    user_id = None
+
+    try:
+        # 1. decode JWT (любую ошибку приводим к AuthError)
+        try:
+            payload = decode_access_token(token)
+        except Exception:
+            raise AccessTokenNotFound()
+
+        # 2. достаём user_id
+        user_id = payload.get("user_id")
+        if user_id is None:
+            raise AccessTokenNotFound()
+
+        # 3. проверяем пользователя
+        user = validate_user_by_user_id(db, user_id)
+
+        return user
+
+    except AuthError as e:
+        # OPTIMIZATION: error-path audit is written in a separate session
+        # so the main transaction rollback does not erase the security log.
+        write_audit_event_safely(
+            user_id=user_id,
+            event_type=e.event_type,
+            ip_address=ip_address,
+            user_agent=None,
+            details={}
+        )
+        raise
+    
+
+def auth_required(func: Callable[P, R]) -> Callable[P, R]:
+    """EN: Decorator that injects ``current_user`` after access-token validation.
+
+    Args:
+        func: Callable that expects ``db``, ``token``, and ``ip_address``.
+
+    Returns:
+        Wrapped callable with ``current_user`` injected into ``kwargs``.
+
+    RU: Декоратор, который подставляет ``current_user`` после проверки access token.
+
+    Аргументы:
+        func: функция, ожидающая ``db``, ``token`` и ``ip_address``.
+
+    Возвращает:
+        Обёрнутую функцию, в ``kwargs`` которой добавляется ``current_user``.
+    """
+
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        """EN: Validate access context and inject ``current_user`` into kwargs.
+
+        RU: Проверяет access-контекст и подставляет ``current_user`` в kwargs.
+        """
+
+        # 1. достаём обязательные аргументы
+        db: Session = kwargs.get("db") or args[0]
+        token: str | None = kwargs.get("token")
+        ip_address: str | None = kwargs.get("ip_address")
+
+        if token is None:
+            raise AccessTokenNotFound()
+
+        # 2. получаем пользователя (вся логика внутри get_current_user)
+        user = get_current_user(db, token, ip_address)
+
+        # 3. прокидываем user в функцию
+        kwargs["current_user"] = user
+
+        # 4. вызываем исходную функцию
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def validate_reset_token(db: Session, token_hash: str) -> PasswordResetToken:
+    """EN: Validate a password reset token by its hash.
+
+    Args:
+        db: Active database session.
+        token_hash: Hashed reset token value.
+
+    Returns:
+        Valid ``PasswordResetToken`` ORM object.
+
+    Raises:
+        AuthError: If the token does not exist, has no expiry, is expired, or was used.
+
+    RU: Проверяет токен сброса пароля по его hash.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        token_hash: хеш reset token.
+
+    Возвращает:
+        Валидный ORM-объект ``PasswordResetToken``.
+
+    Исключения:
+        AuthError: Если токен не существует, не имеет срока действия, истёк или уже использован.
+    """
+
+    password_reset_repo = PasswordResetTokenRepository(db)
+    
+    token = password_reset_repo.get_password_reset_token_by_hash(token_hash)
+
+    now = datetime.now(timezone.utc)
+   
+    
+    if token is None:
+        raise ResetTokenNotFound()
+    
+    if token.expires_at == None:
+        raise ResetTokenNoExpiry()
+
+    if now > token.expires_at:
+        raise ResetTokenExpired()
+    
+    if token.used_at:
+        raise ResetTokenUsed()
+    
+    return token
+
+def validate_user_by_user_id(db: Session, user_id: int) -> User:
+    """EN: Validate that a user exists and is active by user id.
+
+    Args:
+        db: Active database session.
+        user_id: User identifier.
+
+    Returns:
+        Valid active ``User`` object.
+
+    Raises:
+        AuthError: If the user does not exist or is blocked.
+
+    RU: Проверяет, что пользователь по id существует и активен.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        user_id: идентификатор пользователя.
+
+    Возвращает:
+        Валидный активный объект ``User``.
+
+    Исключения:
+        AuthError: Если пользователь не найден или заблокирован.
+    """
+
+    user_repo = UserRepository(db)
+    user = user_repo.get_user_by_id(user_id)
+    if user is None:
+        
+        raise AccessUserNotFound()
+    
+    if not user.is_active:
+       
+        raise AccessUserBlocked()
+    return user
+
+
+def validate_user_by_email(db: Session, emai: str) -> User:
+    """EN: Validate that a user exists and is active by email.
+
+    Args:
+        db: Active database session.
+        emai: User email value.
+
+    Returns:
+        Valid active ``User`` object.
+
+    Raises:
+        AuthError: If the user does not exist or is blocked.
+
+    RU: Проверяет, что пользователь по email существует и активен.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        emai: значение email пользователя.
+
+    Возвращает:
+        Валидный активный объект ``User``.
+
+    Исключения:
+        AuthError: Если пользователь не найден или заблокирован.
+    """
+
+    user_repo = UserRepository(db)
+    user = user_repo.get_user_by_email(emai)
+    if user is None:
+        
+        raise AccessUserNotFound()
+    
+    if not user.is_active:
+       
+        raise AccessUserBlocked()
+    return user
+
+
+def validate_refresh_token(
+    db: Session,
+    refresh_token: str,
+    ip_address: str,
+) -> tuple[RefreshToken, User]:
+    """EN: Validate a refresh token and the user linked to it.
+
+    Args:
+        db: Active database session.
+        refresh_token: Raw refresh token string from the client.
+        ip_address: Client IP address kept for the surrounding auth flow.
+
+    Returns:
+        Tuple of ``(RefreshToken, User)``.
+
+    Raises:
+        AuthError: If the token is missing, revoked, expired, malformed,
+            or linked to a missing/inactive user.
+
+    RU: Проверяет refresh token и пользователя, которому он принадлежит.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        refresh_token: сырая строка refresh token от клиента.
+        ip_address: IP-адрес клиента, сохраняемый для окружающего auth-сценария.
+
+    Возвращает:
+        Кортеж ``(RefreshToken, User)``.
+
+    Исключения:
+        AuthError: Если токен не найден, отозван, просрочен, повреждён
+            или связан с отсутствующим/неактивным пользователем.
+    """
+
+    # подключаемся к бд
+    refresh_repo = RefreshTokenRepository(db)
+    user_repo = UserRepository(db)
+   
+    refresh_token_hash = hash_token(refresh_token)
+    now = datetime.now(timezone.utc)
+   
+    token = refresh_repo.get_refresh_token_by_token_hash(refresh_token_hash)
+    if token is None:
+        
+        raise RefreshTokenNotFound()
+    
+    if token.revoked_at:
+        
+        raise RefreshTokenRevoked()
+    
+    if token.expires_at == None:
+        
+        raise RefreshTokenNoExpiry()
+    
+    if now > token.expires_at:
+        raise RefreshTokenExpired()
+    
+    user = user_repo.get_user_by_id(token.user_id)
+
+    if user is None:
+        
+        raise RefreshUserNotFound()
+    
+    if not user.is_active:
+       
+        raise RefreshUserBlocked()
+    
+    return token, user
+    
+def validate_email(email: str) -> str:
+    """EN: Validate and normalize an email address.
+
+    The function trims whitespace, lowercases the value,
+    and performs a small set of structural email checks.
+
+    Args:
+        email: Raw email string.
+
+    Returns:
+        Normalized email string.
+
+    Raises:
+        ValueError: If the email format is invalid.
+
+    RU: Валидирует и нормализует email-адрес.
+
+    Функция убирает внешние пробелы, переводит значение в нижний регистр
+    и выполняет базовые структурные проверки email.
+
+    Аргументы:
+        email: сырой email в виде строки.
+
+    Возвращает:
+        Нормализованную строку email.
+
+    Исключения:
+        ValueError: Если формат email некорректен.
+    """
+    email = email.strip().lower()
+
+    if not email:
+        raise ValueError("Неверный формат email")
+
+    if email.count("@") != 1:
+        raise ValueError("Неверный формат email")
+
+    local_part, domain_part = email.split("@")
+
+    if not local_part or not domain_part:
+        raise ValueError("Неверный формат email")
+
+    if "." not in domain_part:
+        raise ValueError("Неверный формат email")
+
+    if domain_part.startswith(".") or domain_part.endswith("."):
+        raise ValueError("Неверный формат email")
+
+    return email
+
+def validate_data(data: str) -> str:
+    """EN: Normalize a generic text value and ensure it is not empty.
+
+    Args:
+        data: Raw string value received from input.
+
+    Returns:
+        Trimmed and lowercased string.
+
+    Raises:
+        ValueError: If the resulting value is empty.
+
+    RU: Нормализует текстовое значение и проверяет, что оно не пустое.
+
+    Аргументы:
+        data: сырое строковое значение, пришедшее на вход.
+
+    Возвращает:
+        Строку без внешних пробелов и в нижнем регистре.
+
+    Исключения:
+        ValueError: Если после нормализации значение оказалось пустым.
+    """
+
+    data = data.strip().lower()
+    if not data:
+        raise ValueError ('Значение не должно быть пустым')
+    return data 
+
+@transactional
+def register_family(db: Session, name: str) -> Family:
+    """EN: Register a new family if a family with the same name does not exist.
+
+    Args:
+        db: Active database session.
+        name: Family name to be created.
+
+    Returns:
+        Newly created ``Family`` ORM object.
+
+    Raises:
+        ValueError: If a family with the same name already exists.
+
+    RU: Регистрирует новую семью, если семья с таким именем ещё не существует.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        name: имя семьи, которую нужно создать.
+
+    Возвращает:
+        Новый ORM-объект ``Family``.
+
+    Исключения:
+        ValueError: Если семья с таким именем уже существует.
+    """
+
+    family_repository = FamilyRepository(db)
+
+    existing_family = family_repository.get_family_by_name(name)
+
+    if existing_family is not None:
+        raise ValueError("Семья с таким именем уже существует")
+
+    new_family = family_repository.create_family(name)
+
+    return new_family
+        
+@transactional
+def register_user(db: Session, email: str, password: str, family_name: str) -> User:
+    """EN: Register a user and either join or create a family.
+
+    The function validates input, checks email uniqueness,
+    decides whether the family already exists,
+    and assigns ``admin`` or ``user`` role accordingly.
+
+    Args:
+        db: Active database session.
+        email: Raw user email.
+        password: Raw user password before hashing.
+        family_name: Name of the family to join or create.
+
+    Returns:
+        Newly created ``User`` ORM object.
+
+    Raises:
+        ValueError: If the email is already used or validation fails.
+
+    RU: Регистрирует пользователя и либо присоединяет его к семье, либо создаёт новую.
+
+    Функция валидирует входные данные, проверяет уникальность email,
+    определяет, существует ли уже семья,
+    и в зависимости от этого назначает роль ``admin`` или ``user``.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        email: сырой email пользователя.
+        password: сырой пароль пользователя до хеширования.
+        family_name: имя семьи, к которой нужно присоединиться или которую нужно создать.
+
+    Возвращает:
+        Новый ORM-объект ``User``.
+
+    Исключения:
+        ValueError: Если email уже занят или входные данные не проходят проверку.
+    """
+
+    family_repository = FamilyRepository(db)
+    user_repository = UserRepository(db)
+    # Проверяем email на валидацию
+    email = validate_email(email)
+    family_name = validate_data(family_name)
+    # проверяем есть ли пользователь в системе 
+    existing_user = user_repository.get_user_by_email(email)
+    if existing_user is not None:
+        raise ValueError("Пользователь с таким email уже существует")
+    
+    password_hash = get_password_hash(password) # функция из будущего
+    # проверяем есть ли семья с данным name. Если есть то пользователь создается 
+    # с ролью user, если нет то admin
+    existing_family = family_repository.get_family_by_name(family_name)
+    if existing_family is None:
+        new_family = family_repository.create_family(family_name)
+        family_id = new_family.id
+        role = UserRole.admin
+    else:
+        role = UserRole.user
+        family_id = existing_family.id
+    new_user = user_repository.create_user(email, password_hash, role, family_id) 
+    
+    return new_user
+
+@transactional
+def login_user(
+    db: Session,
+    email: str,
+    password: str,
+    ip_address: str,
+    user_agent: str,
+) -> dict[str, str]:
+    """EN: Authenticate a user, create tokens, and write audit events.
+
+    Args:
+        db: Active database session.
+        email: Email used for login.
+        password: Raw password to verify.
+        ip_address: Client IP address for audit and token storage.
+        user_agent: Client user-agent string for audit and token storage.
+
+    Returns:
+        Dictionary containing ``access_token`` and ``refresh_token``.
+
+    Raises:
+        ValueError: If the user is missing, blocked, or provides a wrong password.
+
+    RU: Аутентифицирует пользователя, создаёт токены и пишет события в аудит.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        email: email для входа в систему.
+        password: сырой пароль для проверки.
+        ip_address: IP-адрес клиента для аудита и хранения токена.
+        user_agent: строка User-Agent клиента для аудита и хранения токена.
+
+    Возвращает:
+        Словарь с ключами ``access_token`` и ``refresh_token``.
+
+    Исключения:
+        ValueError: Если пользователь не найден, заблокирован или ввёл неверный пароль.
+    """
+
+   # 2. инициализируем репозитории
+    user_repository = UserRepository(db)
+    audit_repository = AuditLogRepository(db)
+    refresh_token_repository = RefreshTokenRepository(db)
+
+    #   3. ищем пользователя
+    existing_user = user_repository.get_user_by_email(email)
+
+    # 4. если пользователь не найден — логируем и падаем
+    if existing_user is None:
+        # OPTIMIZATION: failed-login audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id=None,
+            event_type="login_failed_user_not_found",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+        )
+        raise ValueError("Пользователь с таким email не существует")
+
+    # 5. проверяем активность
+    if not existing_user.is_active:
+        # OPTIMIZATION: failed-login audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id=existing_user.id,
+            event_type="login_failed_user_blocked",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+        )
+        raise ValueError("Пользователь заблокирован")
+
+    # 6. проверяем пароль
+    if not verify_password(password, existing_user.password_hash):
+        # OPTIMIZATION: failed-login audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id=existing_user.id,
+            event_type="login_failed_wrong_password",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={"email": email}
+        )
+        raise ValueError("Неверный пароль")
+
+    # 7. создаём access token (JWT)
+    access_token = create_access_token(existing_user.id, existing_user.role)
+
+    # 8. создаём refresh token (raw строка)
+    refresh_token = create_refresh_token()
+
+    # 9. делаем hash refresh token (для БД)
+    refresh_token_hash = hash_token(refresh_token)
+
+    # 10. считаем срок жизни refresh token
+    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    # 11. сохраняем refresh token (в виде hash) в БД
+    refresh_token_repository.create_refresh_token(
+        existing_user.id,
+        refresh_token_hash,
+        expires_at,
+        ip_address,
+        user_agent
+    )
+    
+    # 12. логируем успешный вход
+    audit_repository.create_audit_log(
+        user_id=existing_user.id,
+        event_type="login_success",
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details={"email": email}
+    )
+
+    # 13. возвращаем токены клиенту
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token
+    }
+
+@transactional
+def refresh_access_token(db: Session, refresh_token: str, ip_address: str) -> str:
+    """EN: Validate a refresh token and return a new access token.
+
+    Args:
+        db: Active database session.
+        refresh_token: Raw refresh token string.
+        ip_address: Client IP address used for audit logging.
+
+    Returns:
+        Newly created access token string.
+
+    Raises:
+        AuthError: If refresh-token validation fails.
+
+    RU: Проверяет refresh token и возвращает новый access token.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        refresh_token: сырая строка refresh token.
+        ip_address: IP-адрес клиента для записи в аудит.
+
+    Возвращает:
+        Новый access token в виде строки.
+
+    Исключения:
+        AuthError: Если проверка refresh token завершается ошибкой.
+    """
+
+    audit_repository = AuditLogRepository(db)
+    token = None
+    user = None
+
+    try:
+        token, user = validate_refresh_token(db, refresh_token, ip_address)
+
+    except AuthError as e:
+        # OPTIMIZATION: error-path audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id=token.user_id if token else None,
+            event_type=e.event_type,
+            ip_address=ip_address,
+            user_agent=token.user_agent if token else None,
+            details={}
+        )
+        raise
+    
+    access_token = create_access_token(user.id, user.role)
+    audit_repository.create_audit_log(
+            user_id=user.id,
+            event_type="refresh_success",
+            ip_address=ip_address,
+            user_agent=token.user_agent,
+            details={"email": user.email}
+        )
+    
+    return access_token
+
+
+@transactional
+def logout_user(db: Session, refresh_token: str, ip_address: str) -> bool:
+    """EN: Revoke a refresh token and write a logout audit event.
+
+    Args:
+        db: Active database session.
+        refresh_token: Raw refresh token string.
+        ip_address: Client IP address used for audit logging.
+
+    Returns:
+        ``True`` when logout completes successfully.
+
+    Raises:
+        AuthError: If refresh-token validation fails.
+
+    RU: Отзывает refresh token и пишет audit-событие logout.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        refresh_token: сырая строка refresh token.
+        ip_address: IP-адрес клиента для записи в аудит.
+
+    Возвращает:
+        ``True``, если logout завершён успешно.
+
+    Исключения:
+        AuthError: Если проверка refresh token завершается ошибкой.
+    """
+
+    refresh_repo = RefreshTokenRepository(db)
+    audit_repository = AuditLogRepository(db)
+
+    token = None
+    user = None
+
+    try:
+        token, user = validate_refresh_token(db, refresh_token, ip_address)
+
+    except AuthError as e:
+        # OPTIMIZATION: error-path audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id=token.user_id if token else None,
+            event_type=e.event_type,
+            ip_address=ip_address,
+            user_agent=token.user_agent if token else None,
+            details={}
+        )
+        raise
+
+    # revoke
+    refresh_repo.revoke_refresh_token(token)
+
+    # audit success
+    audit_repository.create_audit_log(
+        user_id=user.id,
+        event_type="logout_success",
+        ip_address=ip_address,
+        user_agent=token.user_agent,
+        details={"email": user.email}
+    )
+
+    return True
+
+@transactional
+def request_password_reset(
+    db: Session,
+    email: str,
+    ip_address: str,
+    user_agent: str,
+) -> str:
+    """EN: Create a password reset token request flow with neutral external response.
+
+    Args:
+        db: Active database session.
+        email: Email for which reset is requested.
+        ip_address: Client IP address for audit logging.
+        user_agent: Client user-agent string for audit logging.
+
+    Returns:
+        Neutral human-readable message.
+
+    RU: Запускает сценарий запроса на сброс пароля с нейтральным внешним ответом.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        email: email, для которого запрашивается сброс.
+        ip_address: IP-адрес клиента для записи в аудит.
+        user_agent: строка User-Agent клиента для записи в аудит.
+
+    Возвращает:
+        Нейтральное текстовое сообщение для внешнего ответа.
+    """
+
+    password_reset_repo = PasswordResetTokenRepository(db)
+    audit_repository = AuditLogRepository(db)
+    email = validate_email(email)
+    
+    user_repo = UserRepository(db)
+    user = user_repo.get_user_by_email(email)
+
+    if user is None:
+        # OPTIMIZATION: error/neutral-path audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id = None,
+            event_type = 'password_reset_requested',
+            ip_address = ip_address,
+            user_agent = user_agent,
+            details = {'email': email}
+        )
+        return 'If the account exists, password reset instructions have been sent\nЕсли пользователь существует, инструкции по восстановлению отправлены'
+    
+    
+    reset_token = create_reset_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES)
+   
+    refresh_token_hash = hash_token(reset_token)
+    # сохраняем refresh token (в виде hash) в БД
+    password_reset_repo.create_password_reset_token(
+        user.id,
+        refresh_token_hash,
+        expires_at,
+    )
+    audit_repository.create_audit_log(
+            user_id = user.id,
+            event_type = 'password_reset_token_created' ,
+            ip_address = ip_address,
+            user_agent = user_agent,
+            details = {'email': email}
+        )
+    return 'If the account exists, password reset instructions have been sent\nЕсли пользователь существует, инструкции по восстановлению отправлены'
+
+@transactional
+def confirm_password_reset(
+    db: Session,
+    reset_token: str,
+    ip_address: str,
+    password: str,
+) -> str:
+    """EN: Confirm password reset using a valid reset token and a new password.
+
+    Args:
+        db: Active database session.
+        reset_token: Raw reset token string from the client.
+        ip_address: Client IP address for audit logging.
+        password: New raw password value.
+
+    Returns:
+        Success message string.
+
+    Raises:
+        AuthError: If the reset token is invalid.
+        ValueError: If the new password does not satisfy password policy.
+
+    RU: Подтверждает сброс пароля по валидному reset token и новому паролю.
+
+    Аргументы:
+        db: активная сессия базы данных.
+        reset_token: сырая строка reset token от клиента.
+        ip_address: IP-адрес клиента для записи в аудит.
+        password: новое сырое значение пароля.
+
+    Возвращает:
+        Строку с сообщением об успешном обновлении.
+
+    Исключения:
+        AuthError: Если reset token невалиден.
+        ValueError: Если новый пароль не проходит парольную политику.
+    """
+
+# Должно работать
+#  • принять raw reset token
+#  • сделать hash
+#  • найти запись
+#  • проверить:
+#  • токен существует
+#  • токен не просрочен
+#  • токен ещё не использован
+#  • провалидировать новый пароль
+#  • захешировать новый пароль
+#  • обновить пароль пользователя
+#  • пометить reset token использованным
+#  • записать audit log
+#  • вернуть message response
+    audit_repository = AuditLogRepository(db)
+    reset_token_hash = hash_token(reset_token)
+    token = None
+    try:
+        token = validate_reset_token(db, reset_token_hash)
+
+    except AuthError as e:
+        # OPTIMIZATION: error-path audit is written through a separate session
+        # so rollback of the main flow does not delete the security event.
+        write_audit_event_safely(
+            user_id = token.user_id if token else None,
+            event_type = e.event_type,
+            ip_address = ip_address,
+            user_agent =  None,
+            details = {}
+        )
+        raise
+
+    passwd = validation_password(password)
+    passwd_hash = get_password_hash(passwd)
+    
+    user_repo = UserRepository(db)
+    user_repo.update_user_password(token.user_id,passwd_hash)
+    reset_repo = PasswordResetTokenRepository(db)
+    reset_repo.mark_token_as_used(reset_token_hash)
+
+    audit_repository.create_audit_log(
+            user_id = token.user_id,
+            event_type = "password_reset_confirmed",
+            ip_address = ip_address,
+            user_agent =  None,
+            details = {}
+        )
+    return 'Пароль успешно обновлён'
+ 
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/schemas/auth.py
+
+# Минимум:
+#  • RegisterRequest
+#  • LoginRequest
+#  • RefreshRequest
+#  • LogoutRequest
+#  • PasswordResetRequest
+#  • PasswordResetConfirmRequest
+#  • TokenResponse
+#  • MessageResponse
+from pydantic import BaseModel
+
+
+
+class RegisterRequest(BaseModel):
+    """EN: Request schema for user registration.
+
+    RU: Схема запроса для регистрации пользователя.
+    """
+
+    email: str
+    password: str
+    family_name: str
+
+class LoginRequest(BaseModel):
+    """EN: Request schema for user login.
+
+    RU: Схема запроса для входа пользователя.
+    """
+        
+    email: str
+    password: str
+
+class RefreshRequest(BaseModel):
+    """EN: Request schema for access-token refresh.
+
+    RU: Схема запроса для обновления access token.
+    """
+
+    refresh_token: str
+
+class LogoutRequest(BaseModel):
+    """EN: Request schema for logout by refresh token.
+
+    RU: Схема запроса для выхода из системы по refresh token.
+    """
+
+    refresh_token: str
+        
+class PasswordResetRequest(BaseModel):
+    """EN: Request schema for starting password reset flow.
+
+    RU: Схема запроса для запуска сценария сброса пароля.
+    """
+
+    email: str
+
+class PasswordResetConfirmRequest(BaseModel):
+    """EN: Request schema for confirming password reset.
+
+    RU: Схема запроса для подтверждения сброса пароля.
+    """
+
+    reset_token: str
+    password: str          # тут подразумевается новый пароль 
+
+class TokenResponse(BaseModel):
+    """EN: Response schema containing access and refresh tokens.
+
+    RU: Схема ответа, содержащая access и refresh токены.
+    """
+
+    access_token: str
+    refresh_token: str
+
+class MessageResponse(BaseModel):
+    """EN: Generic response schema with a text message.
+
+    RU: Универсальная схема ответа с текстовым сообщением.
+    """
+
+    message: str
+
+class AccessTokenResponse(BaseModel):
+    """EN: Response schema containing only a new access token.
+
+    RU: Схема ответа, содержащая только новый access token.
+    """
+
+    access_token: str
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/password_reset_token.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class PasswordResetToken(Base):
+    """EN: ORM model for the ``password_reset_tokens`` table.
+
+    This model represents one-time password reset tokens
+    that can expire and can later be marked as used.
+
+    RU: ORM-модель таблицы ``password_reset_tokens``.
+
+    Эта модель описывает одноразовые токены сброса пароля,
+    которые могут истечь и позже быть помечены как использованные.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    token_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/schemas/family.py
+
+from pydantic import BaseModel
+
+
+
+class FamilyResponse(BaseModel):
+    """EN: Response schema with basic family information.
+
+    RU: Схема ответа с базовой информацией о семье.
+    """
+
+    id: int
+    name: str
+
+
+# END FILE CONTENTS
+
+
+# File: backend/main.py
+
+"""Точка входа FastAPI-приложения.
+
+Модуль собирает приложение в одном месте:
+- создаёт объект FastAPI;
+- подключает auth router;
+- добавляет технический endpoint для проверки доступности сервиса.
+"""
+
+from fastapi import FastAPI
+
+from app.api.auth import router as auth_router
+
+
+app = FastAPI(
+    title="Home Secretary API",
+    description="HTTP API для backend-части проекта Home Secretary.",
+    version="0.1.0",
+)
+
+app.include_router(auth_router)
+
+
+@app.get("/health")
+def health_check() -> dict[str, str]:
+    """Возвращает простой статус доступности приложения.
+
+    Endpoint нужен для быстрой проверки, что сервер запущен,
+    роутинг работает и приложение отвечает на HTTP-запросы.
+
+    :return: Словарь с текстовым статусом приложения.
+    :rtype: dict[str, str]
+    """
+    return {"status": "ok"}
+
+# END FILE CONTENTS
+
+
+# File: README.md
+
+# 🧠 Home Secretary
+
+---
+
+## 🇬🇧 ENGLISH VERSION
+
+### Overview
+
+Home Secretary is a self-hosted web platform for personal and family organization.
+
+It combines multiple domains into a single system:
+
+- task management (todo)
+- calendar planning
+- household finance tracking
+- document storage with metadata
+- notifications (Matrix, web push)
+
+The system is designed to run on a private server and be accessible via the internet for multiple users.
+
+---
+
+### Goals
+
+The main goal is to build a unified digital environment for managing everyday life:
+
+- track tasks and deadlines
+- plan events
+- manage household finances
+- store and search documents
+- receive reminders and alerts
+
+---
+
+### Core Principles
+
+- modular monolith architecture
+- self-hosted deployment
+- multi-user support
+- family-oriented model
+- security-first approach
+- Docker-based infrastructure
+- PostgreSQL as primary database
+
+---
+
+### Architecture
+
+The system follows a modular monolith design:
+
+Core modules:
+
+- authentication
+- users
+- families
+- roles and permissions
+- audit logs
+
+Business modules:
+
+- tasks
+- calendar
+- finance
+- documents
+
+Infrastructure:
+
+- PostgreSQL
+- file storage
+- Matrix notifications
+- web push notifications
+- reverse proxy (HTTPS)
+- backup system
+
+---
+
+### Roles
+
+- admin — manages family-level settings and access
+- user — manages personal and shared data
+
+---
+
+### Authentication
+
+Authentication is based on JWT.
+
+Flow:
+
+- register with email/password
+- login
+- receive access and refresh tokens
+- refresh access token
+- logout
+
+At MVP stage:
+
+- no email confirmation
+- no 2FA
+- password reset supported
+
+---
+
+### Storage
+
+- PostgreSQL — structured data
+- filesystem — uploaded files
+- metadata stored in DB
+
+---
+
+### Clients
+
+- desktop browser
+- mobile browser
+
+---
+
+### Roadmap
+
+Stage 0 — Project foundation  
+Stage 1 — Auth + Users + Families  
+Stage 2 — Organizer / Todo  
+Stage 3 — Calendar  
+Stage 4 — Finance  
+Stage 5 — Documents  
+Stage 6 — Notifications  
+Stage 7 — Security hardening  
+
+---
+
+### Deployment
+
+The system runs in Docker containers:
+
+- backend (FastAPI)
+- PostgreSQL
+- reverse proxy
+- persistent storage for files
+- backup service
+
+---
+
+### Security Notes
+
+This system handles sensitive data:
+
+- personal information
+- financial data
+- documents
+
+Required measures:
+
+- password hashing
+- secure token handling
+- HTTPS
+- access control
+- audit logging
+- backup strategy
+
+---
+
+### Status
+
+Project is currently in architecture and planning phase.  
+Implementation starts with Stage 0 and Stage 1.
+
+---
+
+## 🇷🇺 РУССКАЯ ВЕРСИЯ
+
+### Обзор
+
+Home Secretary — это self-hosted веб-платформа для организации личной и семейной жизни.
+
+Система объединяет:
+
+- список дел (todo)
+- календарь
+- домашнюю бухгалтерию
+- хранение документов с метаданными
+- систему уведомлений (Matrix, web push)
+
+Проект предназначен для запуска на собственном сервере с доступом через интернет для нескольких пользователей.
+
+---
+
+### Цели проекта
+
+Создать единое цифровое пространство для управления повседневной жизнью:
+
+- контроль задач и дедлайнов
+- планирование событий
+- учёт финансов
+- хранение документов
+- получение напоминаний
+
+---
+
+### Основные принципы
+
+- модульный монолит
+- self-hosted архитектура
+- многопользовательская система
+- семейная модель доступа
+- безопасность как базовый принцип
+- Docker-инфраструктура
+- PostgreSQL как основная БД
+
+---
+
+### Архитектура
+
+Система построена как модульный монолит.
+
+Ядро:
+
+- аутентификация
+- пользователи
+- семьи
+- роли и права доступа
+- журналирование действий
+
+Бизнес-модули:
+
+- задачи
+- календарь
+- финансы
+- документы
+
+Инфраструктура:
+
+- PostgreSQL
+- файловое хранилище
+- уведомления через Matrix
+- web push
+- reverse proxy (HTTPS)
+- система резервного копирования
+
+---
+
+### Роли
+
+- admin — управление семьёй и доступами
+- user — работа с личными и общими данными
+
+---
+
+### Аутентификация
+
+Используется JWT.
+
+Сценарий:
+
+- регистрация (email + пароль)
+- вход
+- получение access и refresh токенов
+- обновление токена
+- logout
+
+На этапе MVP:
+
+- без подтверждения email
+- без 2FA
+- восстановление пароля есть
+
+---
+
+### Хранение данных
+
+- PostgreSQL — структурированные данные
+- файловая система — документы
+- метаданные — в БД
+
+---
+
+### Клиенты
+
+- браузер (ПК)
+- браузер (мобильный)
+
+---
+
+### Roadmap
+
+Этап 0 — Подготовка проекта  
+Этап 1 — Auth + Users + Families  
+Этап 2 — Органайзер  
+Этап 3 — Календарь  
+Этап 4 — Финансы  
+Этап 5 — Документы  
+Этап 6 — Уведомления  
+Этап 7 — Усиление безопасности  
+
+---
+
+### Развёртывание
+
+Система работает в Docker:
+
+- backend (FastAPI)
+- PostgreSQL
+- reverse proxy
+- файловое хранилище
+- сервис резервного копирования
+
+---
+
+### Безопасность
+
+Система работает с чувствительными данными:
+
+- личные данные
+- финансы
+- документы
+
+Обязательные меры:
+
+- хеширование паролей
+- контроль токенов
+- HTTPS
+- контроль доступа
+- журналирование
+- резервное копирование
+
+---
+
+### Статус
+
+Проект находится на этапе проектирования архитектуры.  
+Реализация начинается с этапов 0 и 1.
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/fast_api2.md
+
+
+# Полный учебный пример
+
+```py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+
+
+app = FastAPI()
+
+
+class BookCreateRequest(BaseModel):
+    """
+    Описывает входные данные для создания новой книги.
+
+    Эта схема нужна для проверки тела POST-запроса.
+    Клиент обязан передать название, автора и год издания.
+
+    :param title: Название книги.
+    :type title: str
+    :param author: Автор книги.
+    :type author: str
+    :param year: Год издания книги.
+    :type year: int
+    :return: Ничего не возвращает. Используется как схема входных данных.
+    :rtype: None
+    """
+
+    title: str
+    author: str
+    year: int
+
+
+class BookResponse(BaseModel):
+    """
+    Описывает данные, которые backend возвращает клиенту о книге.
+
+    Эта схема нужна для стандартизации ответа API.
+    Она показывает, какие поля разрешено отдавать наружу.
+
+    :param id: Уникальный идентификатор книги.
+    :type id: int
+    :param title: Название книги.
+    :type title: str
+    :param author: Автор книги.
+    :type author: str
+    :param year: Год издания книги.
+    :type year: int
+    :return: Ничего не возвращает. Используется как схема выходных данных.
+    :rtype: None
+    """
+
+    id: int
+    title: str
+    author: str
+    year: int
+
+
+class MessageResponse(BaseModel):
+    """
+    Описывает простой текстовый ответ backend.
+
+    Используется там, где не нужно возвращать объект книги,
+    а нужно только сообщить результат операции.
+
+    :param message: Текст сообщения для клиента.
+    :type message: str
+    :return: Ничего не возвращает. Используется как схема выходных данных.
+    :rtype: None
+    """
+
+    message: str
+
+
+# Учебное "хранилище" в памяти.
+# В реальном проекте вместо этого будет база данных.
+books_db = [
+    {"id": 1, "title": "1984", "author": "George Orwell", "year": 1949},
+    {"id": 2, "title": "Brave New World", "author": "Aldous Huxley", "year": 1932},
+]
+
+
+@app.get("/books", response_model=List[BookResponse])
+def get_all_books():
+    """
+    Возвращает список всех книг.
+
+    Эта функция показывает самый простой GET endpoint:
+    клиент ничего не отправляет в теле запроса,
+    а backend просто отдаёт все книги из хранилища.
+
+    :return: Список книг.
+    :rtype: list[BookResponse]
+    """
+
+    return books_db
+
+
+@app.get("/books/{book_id}", response_model=BookResponse)
+def get_book_by_id(book_id: int):
+    """
+    Возвращает одну книгу по её идентификатору.
+
+    Функция получает идентификатор из URL,
+    ищет книгу в учебном хранилище
+    и либо возвращает её, либо сообщает, что книга не найдена.
+
+    :param book_id: Идентификатор книги из пути URL.
+    :type book_id: int
+    :return: Данные найденной книги.
+    :rtype: BookResponse
+    :raises HTTPException: Если книга с таким идентификатором не найдена.
+    """
+
+    for book in books_db:
+        if book["id"] == book_id:
+            return book
+
+    raise HTTPException(status_code=404, detail="Книга не найдена")
+
+
+@app.post("/books", response_model=BookResponse)
+def create_book(book_data: BookCreateRequest):
+    """
+    Создаёт новую книгу и возвращает её клиенту.
+
+    Функция принимает данные из тела POST-запроса,
+    вычисляет новый идентификатор,
+    формирует объект книги,
+    сохраняет его в учебное хранилище
+    и возвращает результат.
+
+    :param book_data: Проверенные входные данные новой книги.
+    :type book_data: BookCreateRequest
+    :return: Созданная книга.
+    :rtype: BookResponse
+    """
+
+    new_id = max(book["id"] for book in books_db) + 1 if books_db else 1
+
+    new_book = {
+        "id": new_id,
+        "title": book_data.title,
+        "author": book_data.author,
+        "year": book_data.year,
+    }
+
+    books_db.append(new_book)
+    return new_book
+
+
+@app.delete("/books/{book_id}", response_model=MessageResponse)
+def delete_book(book_id: int):
+    """
+    Удаляет книгу по её идентификатору.
+
+    Функция получает идентификатор из URL,
+    ищет книгу в хранилище,
+    удаляет её при нахождении
+    и возвращает сообщение об успешной операции.
+
+    :param book_id: Идентификатор книги, которую нужно удалить.
+    :type book_id: int
+    :return: Сообщение о результате удаления.
+    :rtype: MessageResponse
+    :raises HTTPException: Если книга с таким идентификатором не найдена.
+    """
+
+    for index, book in enumerate(books_db):
+        if book["id"] == book_id:
+            books_db.pop(index)
+            return {"message": "Книга успешно удалена"}
+
+    raise HTTPException(status_code=404, detail="Книга не найдена")
+```
+
+⸻
+
+Теперь подробный разбор, как учитель
+
+⸻
+
+1. Импорты
+
+```py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+```
+
+Разберём по строкам.
+
+>FastAPI
+
+Это главный класс, который создаёт само приложение.
+
+То есть строка ниже:
+
+>app = FastAPI()
+
+означает:
+
+создай backend-приложение, которое умеет принимать HTTP-запросы
+
+⸻
+
+>HTTPException
+
+Это специальный способ вернуть клиенту ошибку через FastAPI.
+
+Например:
+ • книга не найдена,
+ • пользователь не найден,
+ • токен невалиден.
+
+То есть это не просто Python-ошибка “что-то сломалось”, а осмысленный HTTP-ответ с кодом ошибки.
+
+⸻
+
+>BaseModel
+
+Это основа для Pydantic-схем.
+
+Когда ты пишешь:
+
+>class BookCreateRequest(BaseModel):
+
+ты говоришь:
+
+это не обычный класс Python,
+а схема данных, которую FastAPI будет использовать для проверки входа
+
+⸻
+
+>List
+
+Это тип “список”.
+
+Нужно, когда endpoint возвращает не один объект, а много.
+
+Например:
+
+response_model=List[BookResponse]
+
+означает:
+
+backend должен вернуть список книг
+
+⸻
+
+## 2. Создание приложения
+
+app = FastAPI()
+
+Это точка старта.
+
+Если очень просто:
+
+app = FastAPI()
+
+означает:
+
+вот моё веб-приложение
+
+Потом именно к этому объекту ты будешь “подвешивать” endpoint’ы:
+ • @app.get(...)
+ • @app.post(...)
+ • @app.delete(...)
+
+⸻
+
+## 3. Схемы
+
+Это очень важная часть.
+
+⸻
+
+```py
+#BookCreateRequest
+
+class BookCreateRequest(BaseModel):
+    title: str
+    author: str
+    year: int
+```
+
+Эта схема описывает:
+
+что клиент обязан прислать, когда хочет создать книгу
+
+То есть для POST /books backend ждёт:
+ • title
+ • author
+ • year
+
+Если клиент не пришлёт одно из этих полей или пришлёт неверный тип, FastAPI сам вернёт ошибку.
+
+Пример правильного тела запроса
+
+```py
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+```
+
+⸻
+
+BookResponse
+
+```py
+class BookResponse(BaseModel):
+    id: int
+    title: str
+    author: str
+    year: int
+```
+
+Эта схема описывает:
+
+как backend возвращает книгу наружу
+
+Обрати внимание: здесь уже есть id, потому что когда книга создана или получена из хранилища, у неё должен быть идентификатор.
+
+⸻
+
+MessageResponse
+
+```py
+class MessageResponse(BaseModel):
+    message: str
+```
+
+Это простая схема ответа для случаев, когда не нужен целый объект, а нужно просто сообщить результат.
+
+Например:
+
+```py
+{
+  "message": "Книга успешно удалена"
+}
+```
+
+⸻
+
+1. Учебная “база данных”
+
+```py
+books_db = [
+    {"id": 1, "title": "1984", "author": "George Orwell", "year": 1949},
+    {"id": 2, "title": "Brave New World", "author": "Aldous Huxley", "year": 1932},
+]
+```
+
+Это не настоящая база данных.
+
+Это просто список словарей в памяти.
+
+Нужен он только для того, чтобы на учебном примере ты понял механику FastAPI, а не отвлекался сразу на PostgreSQL и SQLAlchemy.
+
+То есть сейчас:
+
+books_db = временное хранилище
+
+В реальном проекте здесь было бы:
+ • repository
+ • service
+ • database
+
+⸻
+
+1. Первый endpoint — получить все книги
+
+```py
+@app.get("/books", response_model=List[BookResponse])
+def get_all_books():
+    return books_db
+```
+
+Разбираем по частям.
+
+⸻
+
+>@app.get("/books", ...)
+
+Это декоратор FastAPI.
+
+Он означает:
+
+если клиент прислал GET-запрос на /books,
+нужно вызвать функцию get_all_books
+
+⸻
+
+Почему GET
+
+Потому что мы получаем данные, а не создаём и не меняем.
+
+⸻
+
+Почему /books
+
+Потому что endpoint относится к коллекции книг.
+
+⸻
+
+>response_model=List[BookResponse]
+
+Это очень важная строка.
+
+Она говорит FastAPI:
+
+ответ должен быть списком объектов BookResponse
+
+То есть backend обещает вернуть:
+ • список,
+ • в котором каждый элемент имеет поля:
+ • id
+ • title
+ • author
+ • year
+
+⸻
+
+Что делает функция
+
+```py
+def get_all_books():
+    return books_db
+```
+
+Она просто возвращает все книги.
+
+То есть запрос:
+
+GET /books
+
+даёт ответ:
+
+```py
+[
+  {"id": 1, "title": "1984", "author": "George Orwell", "year": 1949},
+  {"id": 2, "title": "Brave New World", "author": "Aldous Huxley", "year": 1932}
+]
+```
+
+⸻
+
+1. Второй endpoint — получить книгу по id
+
+```py
+@app.get("/books/{book_id}", response_model=BookResponse)
+def get_book_by_id(book_id: int):
+```
+
+Это уже следующий уровень.
+
+⸻
+
+Что значит "/books/{book_id}"
+
+Это путь с параметром.
+
+То есть если клиент пришёл на:
+ • /books/1
+ • /books/2
+ • /books/100
+
+FastAPI понимает:
+
+вместо {book_id} нужно подставить конкретное число
+
+⸻
+
+book_id: int
+
+Это означает:
+
+параметр book_id должен быть числом
+
+Если клиент пришлёт что-то вроде:
+
+/books/abc
+
+FastAPI сам поймёт, что это не int, и вернёт ошибку.
+
+⸻
+
+Что делает функция
+
+Она перебирает книги и ищет совпадение по id.
+
+Если нашла — возвращает книгу.
+Если нет — вызывает:
+
+>raise HTTPException(status_code=404, detail="Книга не найдена")
+
+⸻
+
+Почему именно HTTPException
+
+Потому что это уже не “внутренний крах программы”, а нормальный API-ответ:
+
+объект с таким id не найден
+
+Клиент получит HTTP-статус 404.
+
+⸻
+
+## 7. Третий endpoint — создать книгу
+
+```py
+@app.post("/books", response_model=BookResponse)
+def create_book(book_data: BookCreateRequest):
+```
+
+Это очень важный пример.
+
+⸻
+
+Почему POST
+
+Потому что мы создаём новый объект.
+
+⸻
+
+Что такое book_data: BookCreateRequest
+
+Вот здесь FastAPI делает магию, которая сначала кажется странной, а потом становится очень удобной.
+
+Это означает:
+
+возьми тело HTTP-запроса
+проверь его по схеме BookCreateRequest
+если всё нормально — передай в функцию как объект book_data
+
+⸻
+
+Что получает функция
+
+Не сырой dict, а уже проверенный объект с полями:
+ • book_data.title
+ • book_data.author
+ • book_data.year
+
+⸻
+
+Что делает функция
+
+Шаг 1
+
+Считает новый id:
+
+>new_id = max(book["id"] for book in books_db) + 1 if books_db else 1
+
+Логика:
+ • если книги уже есть, берём максимальный id и прибавляем 1
+ • если книг нет, начинаем с 1
+
+⸻
+
+Шаг 2
+
+Создаёт новый словарь книги:
+
+```py
+new_book = {
+    "id": new_id,
+    "title": book_data.title,
+    "author": book_data.author,
+    "year": book_data.year,
+}
+```
+
+⸻
+
+Шаг 3
+
+Добавляет книгу в “базу”:
+
+>books_db.append(new_book)
+
+⸻
+
+Шаг 4
+
+Возвращает созданную книгу:
+
+>return new_book
+
+⸻
+
+Что клиент получит
+
+Если клиент отправил:
+
+```py
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+#то backend вернёт:
+
+{
+  "id": 3,
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+```
+
+⸻
+
+1. Четвёртый endpoint — удалить книгу
+
+```py
+@app.delete("/books/{book_id}", response_model=MessageResponse)
+def delete_book(book_id: int):
+```
+
+⸻
+
+Почему DELETE
+
+Потому что мы удаляем объект.
+
+⸻
+
+Что делает функция
+
+Она ищет книгу по id.
+
+Если нашла:
+ • удаляет её из списка
+ • возвращает сообщение:
+
+```py
+{
+  "message": "Книга успешно удалена"
+}
+```
+
+Если не нашла:
+> • возвращает 404
+
+⸻
+
+## 9. Что здесь уже можно понять про FastAPI
+
+На одном этом примере ты уже видишь все базовые вещи.
+
+⸻
+
+А. Маршрутизация
+
+FastAPI связывает:
+ • HTTP-метод
+ • путь
+ • функцию
+
+⸻
+
+Б. Path parameters
+
+Пример:
+
+/books/{book_id}
+
+⸻
+
+В. Request schema
+
+Пример:
+
+BookCreateRequest
+
+⸻
+
+Г. Response schema
+
+Примеры:
+
+BookResponse
+MessageResponse
+List[BookResponse]
+
+⸻
+
+Д. Автоматическая валидация
+
+FastAPI проверяет входные данные по схеме до того, как твоя логика начнёт работать.
+
+⸻
+
+Е. Ошибки через HTTPException
+
+Ты можешь осмысленно вернуть клиенту:
+ • не найдено
+ • неверный запрос
+ • и так далее
+
+⸻
+
+1. Как бы это выглядело в более взрослом проекте
+
+Сейчас у нас всё в одном файле — это учебный упрощённый пример.
+
+* ***В реальном проекте было бы так:***
+* • schemas/book.py
+* • repositories/book_repository.py
+* • services/book_service.py
+* • api/book.py
+
+То есть:
+
+endpoint → service → repository → db
+
+Но для первого знакомства это было бы только мешающим перегрузом.
+
+⸻
+
+1. Что важно тебе понять именно сейчас
+
+Если убрать всю “красоту”, то FastAPI в этом примере делает три главные вещи:
+
+1. Принимает HTTP-запрос
+
+Например:
+
+POST /books
+
+⸻
+
+1. Превращает входные данные в понятный Python-объект
+
+Через BookCreateRequest
+
+⸻
+
+1. Возвращает клиенту правильный ответ
+
+Через BookResponse или MessageResponse
+
+⸻
+
+1. Что можно мысленно потрогать руками
+
+Вот как ты должен это представлять.
+
+⸻
+
+Сценарий: создать книгу
+
+Клиент отправил:
+
+```py
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+```
+
+FastAPI:
+ • принял POST /books
+ • проверил JSON по BookCreateRequest
+
+Твоя функция:
+ • создала новую книгу
+ • добавила в хранилище
+
+FastAPI:
+ • завернул ответ в формат BookResponse
+
+Клиент получил:
+
+```py
+{
+  "id": 3,
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+```
+
+⸻
+
+1. Самая важная мысль
+
+FastAPI — это не “волшебство”, а просто очень удобный способ связать:
+
+>HTTP ←→ Python-функции ←→ данные ←→ ответы
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/refresh_token_repository.py
+
+from datetime import datetime,timezone
+
+from sqlalchemy.orm import Session
+
+from app.models.refresh_token import RefreshToken
+
+
+class RefreshTokenRepository:
+    """EN: Repository for low-level work with ``refresh_tokens`` data.
+
+    It keeps token-related SQLAlchemy operations in one place
+    so auth logic stays cleaner in higher layers.
+
+    RU: Репозиторий для низкоуровневой работы с данными ``refresh_tokens``.
+
+    Он собирает token-related операции SQLAlchemy в одном месте,
+    чтобы auth-логика в верхних слоях оставалась чище.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Save the session object that all repository methods will use.
+
+        Args:
+            db: Active SQLAlchemy session used for token queries and writes.
+
+        RU: Сохраняет объект Session, через который будут работать все методы репозитория.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия для запросов и записи токенов.
+        """
+
+        self.db = db
+
+    def get_refresh_token_by_user_id(self, user_id: int) -> RefreshToken | None:
+        """EN: Return the first refresh token record for a user or ``None``.
+
+        Args:
+            user_id: Identifier of the user whose token is being searched.
+
+        Returns:
+            ``RefreshToken`` object or ``None``.
+
+        RU: Возвращает первую запись refresh token пользователя или ``None``.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чей токен ищется.
+
+        Возвращает:
+            Объект ``RefreshToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(RefreshToken)
+            .filter(RefreshToken.user_id == user_id)
+            .first()
+        )
+
+    def get_refresh_token_by_token_hash(self, token: str) -> RefreshToken | None:
+        """EN: Find a refresh token row by its stored hash.
+
+        Args:
+            token: Hashed refresh token value stored in the database.
+
+        Returns:
+            Matching ``RefreshToken`` object or ``None``.
+
+        RU: Ищет запись refresh token по сохранённому hash-значению.
+
+        Аргументы:
+            token: хеш refresh token, который хранится в базе данных.
+
+        Возвращает:
+            Найденный объект ``RefreshToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(RefreshToken)
+            .filter(RefreshToken.token_hash == token)
+            .first()
+        )
+   
+    def create_refresh_token(
+        self,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+        ip_address: str,
+        user_agent: str,
+    ) -> RefreshToken:
+        """EN: Create a refresh token record, save its hash, and return the ORM object.
+
+        Args:
+            user_id: Token owner identifier.
+            token_hash: Hashed token value stored in the database.
+            expires_at: Datetime when the token becomes invalid.
+            ip_address: Client IP address from which the token was issued.
+            user_agent: Client user-agent string.
+
+        Returns:
+            Saved ``RefreshToken`` ORM object.
+
+        RU: Создаёт запись refresh token, сохраняет её hash и возвращает ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор владельца токена.
+            token_hash: хеш токена, который будет храниться в базе.
+            expires_at: дата и время, после которых токен считается недействительным.
+            ip_address: IP-адрес клиента, с которого был выдан токен.
+            user_agent: строка User-Agent клиента.
+
+        Возвращает:
+            Сохранённый ORM-объект ``RefreshToken``.
+        """
+
+        refresh_token = RefreshToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+        self.db.add(refresh_token)
+        
+
+        return refresh_token
+
+
+    def revoke_refresh_token(self, token_object: RefreshToken) -> RefreshToken:
+        """EN: Mark an existing refresh token as revoked.
+
+        The method does NOT perform any lookup or validation.
+        It only updates the given ORM object.
+
+        Args:
+            token_object: Existing RefreshToken ORM object.
+
+        Returns:
+            Updated RefreshToken object.
+
+        RU: Помечает переданный refresh token как отозванный.
+
+        Метод НЕ выполняет поиск и проверки.
+        Он только изменяет уже полученный ORM-объект.
+
+        Аргументы:
+            token_object: ORM-объект RefreshToken.
+
+        Возвращает:
+            Обновлённый объект RefreshToken.
+        """
+
+        token_object.revoked_at = datetime.now(timezone.utc)
+        return token_object
+
+
+# END FILE CONTENTS
+
+
+# File: Technical Specification_2.md
+
+
+ТЗ 2 — Auth Core MVP для проекта Home Secretary
+
+1. Смысл этапа
+
+На этом этапе мы не создаём проект с нуля.
+Мы берём уже существующий фундамент и доводим auth-ядро до рабочего состояния.
+
+То есть задача этапа:
+
+собрать минимально законченный backend-блок аутентификации и пользователей, который уже можно будет запускать через FastAPI и тестировать как реальный сервис.
+
+⸻
+
+1. Что уже считается сделанным
+
+Это важно, чтобы не делать лишнюю работу повторно.
+
+У тебя уже есть:
+ • структура проекта
+ • database.py
+ • ORM-модели
+ • repository-слой
+ • базовый security.py
+ • частично собранный auth_service.py
+ • Docker + PostgreSQL
+ • SQL init для БД
+
+Значит на этом этапе не нужно снова возвращаться к проектированию схемы.
+Схема уже есть. Теперь задача — довести поведение системы.
+
+⸻
+
+1. Главная цель этапа
+
+После завершения ТЗ 2 должна работать такая цепочка:
+ • регистрация пользователя
+ • вход в систему
+ • выдача access token и refresh token
+ • обновление access token через refresh token
+ • выход из системы
+ • получение текущего пользователя через access token
+ • запрос на сброс пароля
+ • подтверждение сброса пароля
+
+И всё это должно работать через:
+ • FastAPI endpoint’ы
+ • service-слой
+ • repository-слой
+ • PostgreSQL
+
+⸻
+
+1. Что входит в ТЗ 2
+
+Входит:
+ • доведение config.py
+ • доведение database.py
+ • доведение security.py
+ • доведение repository под auth use case
+ • доведение auth_service.py
+ • создание schemas/
+ • создание api/auth.py
+ • создание main.py
+ • подключение FastAPI к БД через dependency
+ • ручная проверка auth-сценариев
+
+⸻
+
+1. Что в ТЗ 2 не входит
+
+Чтобы не расползтись в стороны, этот этап не включает:
+ • frontend
+ • email-отправку
+ • 2FA
+ • rate limiting
+ • Alembic
+ • HTTPS / reverse proxy
+ • календарь
+ • todo
+ • финансы
+ • документы
+ • Matrix
+ • политику сложных прав доступа сверх admin/user
+
+То есть сейчас только:
+
+Auth + Users + Families backend core
+
+⸻
+
+1. Архитектурное правило этапа
+
+Всё, что ты будешь делать дальше, должно укладываться в такую цепочку:
+
+API -> Service -> Repository -> DB
+
+Где:
+ • API принимает HTTP-запрос
+ • Service решает сценарий
+ • Repository работает с таблицами
+ • DB хранит данные
+
+Запрещено смешивать это между собой.
+
+⸻
+
+1. Подзадачи этапа
+
+Теперь главное. Я разобью ТЗ на реальные рабочие блоки.
+
+⸻
+
+Блок A. Конфигурация и подключение к БД
+
+Цель блока
+
+Сделать так, чтобы приложение получало настройки из одного места и стабильно работало с БД.
+
+Нужно сделать
+
+A.1. Довести config.py
+В config.py должны храниться и читаться из env следующие значения:
+ • SECRET_KEY
+ • DATABASE_URL
+ • ACCESS_TOKEN_EXPIRE_MINUTES
+ • REFRESH_TOKEN_EXPIRE_DAYS
+
+Требование
+
+Если обязательная переменная отсутствует, приложение должно падать сразу и понятно.
+
+⸻
+
+A.2. Довести database.py
+В database.py должно быть:
+ • подключение через DATABASE_URL из config.py
+ • engine
+ • SessionLocal
+ • Base
+ • get_db()
+
+Требование
+
+Никакого хардкода строки подключения в database.py после завершения этого блока быть не должно.
+
+⸻
+
+Критерий готовности блока A
+Блок считается готовым, если:
+ • config.py читает все критичные переменные
+ • database.py использует config.py
+ • есть get_db()
+ • можно получить рабочую SQLAlchemy Session через dependency
+
+⸻
+
+Блок B. Security слой
+
+Цель блока
+
+Зафиксировать единый и понятный security API.
+
+В security.py должны быть рабочие функции:
+ • validation_password
+ • get_password_hash
+ • verify_password
+ • create_access_token
+ • create_refresh_token
+ • hash_token
+
+Дополнительно нужно добавить:
+ • decode_access_token
+
+Требования
+ • SECRET_KEY берётся из config
+ • TTL access token берётся из config
+ • TTL refresh token берётся из config или контролируется на service-уровне, но без магических чисел по всему коду
+ • refresh token должен быть достаточно длинным и случайным
+ • hash_token должен использовать криптографический хеш
+
+⸻
+
+Критерий готовности блока B
+Блок готов, если:
+ • пароль валидируется
+ • пароль хешируется
+ • пароль проверяется
+ • access token создаётся и декодируется
+ • refresh token создаётся
+ • refresh token можно безопасно хешировать
+
+⸻
+
+Блок C. Repository слой под auth use case
+
+Цель блока
+
+Сделать repository не “вообще”, а под конкретные auth-сценарии.
+
+Нужно проверить и довести:
+
+C.1. UserRepository
+Должны быть методы:
+ • get_user_by_email
+ • get_user_by_id
+ • create_user
+ • update_user_password
+
+Опционально позже:
+ • set_user_active_status
+
+⸻
+
+C.2. FamilyRepository
+Должны быть методы:
+ • get_family_by_name
+ • create_family
+
+Вопрос created_by пока не усложняем, но поле должно быть согласовано с моделью и схемой.
+
+⸻
+
+C.3. RefreshTokenRepository
+Должны быть методы:
+ • get_refresh_token_by_token_hash
+ • create_refresh_token
+ • revoke_refresh_token
+
+⸻
+
+C.4. PasswordResetTokenRepository
+Должны быть методы:
+ • create_password_reset_token
+ • get_password_reset_token_by_hash
+ • mark_token_as_used
+
+⸻
+
+C.5. AuditLogRepository
+Должны быть методы:
+ • create_audit_log
+ • get_audit_logs_by_user_id
+
+⸻
+
+Требование ко всем repository
+Repository не должны:
+ • создавать токены
+ • решать бизнес-логику
+ • валидировать пароль
+ • декодировать JWT
+
+Repository только работают с БД.
+
+⸻
+
+Блок D. Auth service
+
+Это главный блок ТЗ 2.
+
+Цель блока
+
+Собрать законченные auth-сценарии.
+
+⸻
+
+D.1. register_user
+
+Должно работать
+ • валидация email
+ • валидация family_name
+ • проверка, что email ещё не занят
+ • хеширование пароля
+ • поиск или создание семьи
+ • назначение роли:
+ • admin если семья создаётся впервые
+ • user если семья уже есть
+ • создание пользователя
+ • audit log
+
+Результат
+
+Возвращается созданный пользователь или структура для API.
+
+⸻
+
+D.2. login_user
+
+Должно работать
+ • нормализация email
+ • поиск пользователя
+ • проверка, что пользователь существует
+ • проверка is_active
+ • проверка пароля
+ • создание access token
+ • создание refresh token
+ • хеширование refresh token
+ • сохранение hash refresh token в БД
+ • запись audit log
+ • возврат:
+ • access_token
+ • refresh_token
+
+⸻
+
+D.3. refresh_access_token
+
+Должно работать
+ • принять raw refresh token
+ • сделать hash
+ • найти запись по hash
+ • проверить:
+ • токен существует
+ • токен не просрочен
+ • токен не отозван
+ • найти пользователя
+ • проверить is_active
+ • создать новый access token
+ • записать audit log
+ • вернуть новый access token
+
+⸻
+
+D.4. logout_user
+
+Должно работать
+ • принять raw refresh token
+ • сделать hash
+ • найти запись
+ • если токен не найден — audit + ошибка
+ • если пользователь не найден — audit + ошибка
+ • вызвать revoke_refresh_token
+ • записать audit log
+ • вернуть результат завершения logout
+
+⸻
+
+D.5. get_current_user
+
+Это новый обязательный сценарий
+Должно работать так:
+ • принять access token
+ • декодировать его
+ • достать user_id
+ • найти пользователя в БД
+ • проверить, что пользователь существует
+ • вернуть текущего пользователя
+
+Это сервисная основа для /auth/me.
+
+⸻
+
+D.6. request_password_reset
+
+Должно работать
+ • принять email
+ • найти пользователя
+ • если пользователь не найден — вернуть нейтральный ответ, без раскрытия факта существования пользователя
+ • создать raw reset token
+ • сделать hash reset token
+ • сохранить hash в БД
+ • записать audit log
+ • вернуть нейтральный response
+
+На этом этапе не отправляем email.
+Пока только готовим backend flow.
+
+⸻
+
+D.7. confirm_password_reset
+
+Должно работать
+ • принять raw reset token
+ • сделать hash
+ • найти запись
+ • проверить:
+ • токен существует
+ • токен не просрочен
+ • токен ещё не использован
+ • провалидировать новый пароль
+ • захешировать новый пароль
+ • обновить пароль пользователя
+ • пометить reset token использованным
+ • записать audit log
+ • вернуть message response
+
+⸻
+
+Требования ко всему auth_service.py
+
+Нужно убрать:
+ • лишние импорты
+ • неиспользуемые модели в service
+ • ошибки в event_type
+ • ошибки с res.id вместо user_id
+ • ошибки с обращением к полям, которых нет у модели
+ • самопересекающиеся зависимости
+
+⸻
+
+Критерий готовности блока D
+Блок готов, если все 7 сценариев выше логически завершены и не противоречат архитектуре.
+
+⸻
+
+Блок E. Schemas
+
+Цель блока
+
+Сделать чёткий контракт между API и backend-логикой.
+
+Нужно создать:
+
+schemas/auth.py
+Минимум:
+ • RegisterRequest
+ • LoginRequest
+ • RefreshRequest
+ • LogoutRequest
+ • PasswordResetRequest
+ • PasswordResetConfirmRequest
+ • TokenResponse
+ • MessageResponse
+
+⸻
+
+schemas/user.py
+Минимум:
+ • UserResponse
+ • MeResponse
+
+⸻
+
+schemas/family.py
+Минимум:
+ • FamilyResponse
+
+⸻
+
+Требование
+
+Схемы должны описывать:
+ • входные данные endpoint
+ • выходные данные endpoint
+
+И не должны содержать бизнес-логику.
+
+⸻
+
+Блок F. API слой
+
+Цель блока
+
+Поднять HTTP API над service-слоем.
+
+Нужно создать api/auth.py
+
+В нём должны быть endpoint’ы:
+ • POST /auth/register
+ • POST /auth/login
+ • POST /auth/refresh
+ • POST /auth/logout
+ • GET /auth/me
+ • POST /auth/password-reset/request
+ • POST /auth/password-reset/confirm
+
+⸻
+
+Правило API слоя
+
+API слой:
+ • принимает request schema
+ • получает db через get_db
+ • вызывает service
+ • возвращает response schema
+
+В API запрещено:
+ • писать SQLAlchemy query
+ • хешировать пароль
+ • делать JWT руками
+ • писать бизнес-логику
+
+⸻
+
+Блок G. main.py
+
+Цель блока
+
+Сделать запускаемую точку входа приложения.
+
+Нужно
+
+Создать main.py, в котором:
+ • создаётся FastAPI()
+ • подключается auth router
+ • опционально создаётся health endpoint
+
+⸻
+
+Блок H. requirements.txt
+
+Цель блока
+
+Сделать файл зависимостей пригодным для установки.
+
+Сейчас проблема
+
+У тебя в requirements.txt написаны команды pip install ..., а не сами пакеты.
+
+Нужно
+
+Сделать обычный список зависимостей, без pip install.
+
+Минимально там должны быть зависимости для:
+ • FastAPI
+ • SQLAlchemy
+ • psycopg
+ • pwdlib
+ • pyjwt
+ • python-dotenv
+ • pydantic
+ • uvicorn
+
+⸻
+
+1. Критерии готовности ТЗ 2
+
+ТЗ 2 считается закрытым, если выполняется всё ниже:
+
+ 1. config.py хранит ключевые настройки
+ 2. database.py использует config и выдаёт session
+ 3. регистрация работает
+ 4. логин работает
+ 5. refresh работает
+ 6. logout работает
+ 7. /auth/me работает
+ 8. password reset request работает
+ 9. password reset confirm работает
+ 10. audit logs пишутся на все auth-сценарии
+ 11. есть schemas
+ 12. есть api/auth.py
+ 13. есть main.py
+ 14. requirements.txt можно использовать для установки
+ 15. весь код укладывается в архитектуру:
+
+ • API -> Service -> Repository -> DB
+
+⸻
+
+1. Порядок выполнения для тебя
+
+С учётом твоего уровня правильный порядок такой:
+
+Шаг 1
+
+Довести:
+ • config.py
+ • database.py
+ • requirements.txt
+
+Шаг 2
+
+Довести:
+ • security.py
+
+Шаг 3
+
+Довести:
+ • repositories под missing methods
+
+Шаг 4
+
+Довести:
+ • auth_service.py
+ • register
+ • login
+ • refresh
+ • logout
+ • get_current_user
+ • reset flows
+
+Шаг 5
+
+Создать:
+ • schemas/*
+
+Шаг 6
+
+Создать:
+ • api/auth.py
+
+Шаг 7
+
+Создать:
+ • main.py
+
+Шаг 8
+
+Прогнать сценарии руками
+
+⸻
+
+1. Что я считаю самым важным
+
+На этом этапе твоя задача — не “написать побольше кода”.
+Твоя задача — научиться собирать законченную backend-фичу по слоям.
+
+Если ты закроешь это ТЗ, у тебя уже будет не абстрактное обучение, а реальный auth-модуль уровня MVP.
+
+⸻
+
+1. Мой короткий итог
+
+Это и есть моё готовое ТЗ 2, адаптированное под твой проект и твой уровень:
+
+довести существующий auth/users/families backend до рабочего FastAPI MVP, не переписывая всё заново, а аккуратно завершая уже созданные слои и добавляя недостающие сценарии.
+
+⸻
+
+Дальше правильно не обсуждать всё сразу, а взять только первый подшаг ТЗ 2.
+И он у нас уже определён:
+
+Шаг 1: довести config.py, database.py, requirements.txt.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/Dockerfile
+
+
+
+# END FILE CONTENTS
+
+
+# File: Technical Specification_1.md
+
+Хорошо. Тогда только первый подшаг.
+Без прыжков дальше.
+
+Подшаг 1 — database.py + models/*
+
+Цель подшага
+
+Подготовить базу для ORM-части backend:
+ • подключение к PostgreSQL
+ • базовый класс моделей
+ • ORM-модели для таблиц:
+ • families
+ • users
+ • refresh_tokens
+ • password_reset_tokens
+ • audit_logs
+
+На этом шаге не должно быть:
+ • endpoint’ов
+ • сервисов
+ • auth-логики
+ • JWT
+ • хеширования
+ • repository-слоя
+
+Только инфраструктура БД и модели.
+
+⸻
+
+1. Что должно получиться в конце
+
+После завершения этого подшага у тебя должны быть файлы:
+
+backend/app/core/database.py
+backend/app/models/family.py
+backend/app/models/user.py
+backend/app/models/refresh_token.py
+backend/app/models/password_reset_token.py
+backend/app/models/audit_log.py
+
+И дополнительно очень желательно:
+
+backend/app/models/__init__.py
+
+⸻
+
+1. Задача файла database.py
+
+Файл должен решать 3 вещи:
+
+2.1. Создать базовый класс моделей
+
+Это будет общий Base, от которого наследуются все ORM-модели.
+
+⸻
+
+2.2. Создать подключение к БД
+
+Нужно описать:
+ • engine
+ • фабрику сессий
+ • функцию/механизм получения сессии
+
+⸻
+
+2.3. Быть центральной точкой для ORM
+
+Все модели должны опираться на этот файл, а не создавать подключение каждая сама по себе.
+
+⸻
+
+1. Что должно быть в database.py концептуально
+
+Без готового кода, но по смыслу там должны быть такие элементы:
+
+3.1. Импорт SQLAlchemy
+
+Ты будешь использовать ORM, значит там должны быть импорты для:
+ • engine
+ • sessionmaker
+ • declarative base
+
+⸻
+
+3.2. DATABASE_URL
+
+Строка подключения должна браться из конфигурации, а не быть захардкоженной прямо в файле.
+
+Но на первом черновике, если у тебя ещё нет config.py, допустимо временно сделать напрямую переменную подключения.
+
+Важно
+
+Это временное упрощение. Потом вынесешь в config.py.
+
+⸻
+
+3.3. Engine
+
+Должен быть объект подключения к PostgreSQL.
+
+⸻
+
+3.4. Session factory
+
+Должна быть фабрика сессий, через которую потом будут работать repository.
+
+⸻
+
+3.5. Base
+
+Должен быть базовый класс для моделей.
+
+⸻
+
+1. Задача моделей
+
+Каждая модель должна отражать уже утверждённую SQL-схему.
+
+То есть сейчас ты не придумываешь заново БД, а переносишь её в SQLAlchemy ORM.
+
+⸻
+
+1. Что должно быть в каждой модели
+
+Для каждой модели ты должен задать:
+ • имя таблицы
+ • поля
+ • типы
+ • primary key
+ • nullable
+ • unique
+ • default
+ • foreign key, где нужно
+
+⸻
+
+1. Перечень моделей и что в них должно быть
+
+⸻
+
+6.1. family.py
+
+Модель таблицы families
+
+Поля:
+ • id
+ • name
+ • created_at
+ • created_by
+
+Важно
+
+created_by пока без внешнего ключа, как в утверждённой схеме.
+
+⸻
+
+6.2. user.py
+
+Модель таблицы users
+
+Поля:
+ • id
+ • email
+ • password_hash
+ • role
+ • is_active
+ • family_id
+ • created_at
+ • updated_at
+
+Важно
+
+Нужно аккуратно отразить role как ENUM на стороне ORM.
+
+⸻
+
+6.3. refresh_token.py
+
+Модель таблицы refresh_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • revoked_at
+ • created_at
+ • ip_address
+ • user_agent
+
+⸻
+
+6.4. password_reset_token.py
+
+Модель таблицы password_reset_tokens
+
+Поля:
+ • id
+ • user_id
+ • token_hash
+ • expires_at
+ • used_at
+ • created_at
+
+⸻
+
+6.5. audit_log.py
+
+Модель таблицы audit_logs
+
+Поля:
+ • id
+ • user_id
+ • event_type
+ • ip_address
+ • user_agent
+ • created_at
+ • details
+
+Важно
+
+details должен быть JSON/JSONB-совместимым типом на стороне PostgreSQL.
+
+⸻
+
+1. Что пока можно НЕ делать
+
+На этом шаге не обязательно делать:
+ • relationship между моделями
+ • back_populates
+ • каскады ORM-уровня
+ • mixin-классы
+ • автоматическое обновление updated_at
+ • Alembic
+ • Pydantic-схемы
+
+Почему
+
+Сейчас задача — правильно завести модели, а не сделать идеальный enterprise ORM.
+
+⸻
+
+1. Что я буду проверять в твоём коде
+
+Когда ты пришлёшь этот подшаг, я буду смотреть на:
+
+8.1. Архитектуру
+ • нет ли подключения к БД в моделях
+ • нет ли смешивания разных слоёв
+
+8.2. Соответствие SQL-схеме
+ • совпадают ли типы
+ • совпадают ли имена таблиц
+ • нет ли лишних полей
+
+8.3. Чистоту ORM
+ • корректно ли задан Base
+ • корректно ли задан engine/session
+ • корректно ли описан ENUM
+ • корректно ли описан JSON/INET/DateTime
+
+⸻
+
+1. Практические правила для этого шага
+
+Правило 1
+
+Одна модель — один файл.
+
+Правило 2
+
+Не писать всю логику в database.py.
+
+Правило 3
+
+Не делать пока repository.
+
+Правило 4
+
+Не писать пока endpoint’ы.
+
+Правило 5
+
+Если сомневаешься в типе ORM — лучше спросить или показать черновик.
+
+⸻
+
+1. Критерий готовности подшага
+
+Подшаг считается выполненным, если:
+ 1. database.py создан
+ 2. все 5 ORM-моделей созданы
+ 3. модели отражают SQL-схему
+ 4. код структурно чистый
+ 5. нет перемешивания слоёв приложения
+
+⸻
+
+1. Что делать тебе сейчас
+
+Твоя задача:
+ 1. написать core/database.py
+ 2. написать все файлы в models/
+ 3. прислать мне их на проверку
+
+Лучше присылать:
+ • сначала database.py
+ • потом модели одним сообщением или частями
+
+Так будет проще проверить без каши.
+
+Начинай с database.py.
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/3.md
+
+1. first()
+
+self.db.query(User).filter(User.email == email).first()
+
+Что делает
+
+Берёт первую найденную запись.
+
+Что вернёт
+ • объект ORM-модели
+ • или None, если ничего нет
+
+Когда использовать
+
+Когда:
+ • нужна одна запись
+ • и тебе не страшно, что их теоретически может быть несколько
+
+⸻
+
+1. scalar()
+
+self.db.query(User.id).filter(User.email == email).scalar()
+
+Что делает
+
+Возвращает одно скалярное значение.
+
+Скалярное = одно простое значение:
+ • число
+ • строка
+ • дата
+
+Что вернёт
+ • например 5
+ • или None
+
+Когда использовать
+
+Когда ты выбираешь одну колонку, а не весь объект.
+
+⸻
+
+1. all()
+
+self.db.query(User).all()
+
+Что делает
+
+Возвращает все найденные записи
+
+Что вернёт
+
+Список:
+
+[User(...), User(...), User(...)]
+
+или пустой список:
+
+[]
+
+Когда использовать
+
+Когда нужно получить много объектов.
+
+Например:
+ • всех пользователей семьи
+ • все audit log записи пользователя
+
+⸻
+
+1. one()
+
+self.db.query(User).filter(User.email == email).one()
+
+Что делает
+
+Требует, чтобы результат был ровно один
+
+Что будет
+ • если запись одна → вернёт её
+ • если записей нет → ошибка
+ • если записей больше одной → ошибка
+
+Когда использовать
+
+Когда ты уверен, что должна быть ровно одна запись, и хочешь жёсткое поведение.
+
+⸻
+
+1. one_or_none()
+
+self.db.query(User).filter(User.email == email).one_or_none()
+
+Что делает
+
+Ожидает:
+ • либо одну запись
+ • либо ни одной
+
+Что будет
+ • одна запись → вернёт объект
+ • нет записей → None
+ • больше одной → ошибка
+
+Когда использовать
+
+Когда запись должна быть уникальной, и ты хочешь это контролировать.
+
+Для email, например, это часто хороший вариант, потому что email у тебя уникален.
+
+⸻
+
+1. count()
+
+self.db.query(User).count()
+
+Что делает
+
+Возвращает количество записей
+
+Что вернёт
+
+Число:
+
+5
+
+Когда использовать
+
+Когда нужно узнать, сколько строк найдено.
+
+Например:
+ • сколько пользователей в семье
+ • сколько активных токенов у пользователя
+
+⸻
+
+1. scalar_one() и scalar_one_or_none()
+
+Это уже более новый и строгий стиль, чаще используется в SQLAlchemy 2.x через select(). Пока тебе рано в это углубляться.
+Для текущего этапа тебе достаточно понять:
+ • first()
+ • scalar()
+ • all()
+ • one_or_none()
+
+⸻
+
+Самая понятная таблица
+
+Метод Возвращает Если нет записей Если много записей
+first() первая запись None просто возьмёт первую
+scalar() одно значение None зависит от запроса
+all() список [] список всех
+one() ровно одну запись ошибка ошибка
+one_or_none() одну запись или None None ошибка
+count() число 0 число
+
+⸻
+
+На одном живом примере
+
+Допустим, у тебя есть таблица пользователей.
+
+⸻
+
+Получить одного пользователя
+
+user = self.db.query(User).filter(User.email == email).first()
+
+Результат
+ • объект User
+ • или None
+
+⸻
+
+Получить только его id
+
+user_id = self.db.query(User.id).filter(User.email == email).scalar()
+
+Результат
+ • 1
+ • или None
+
+⸻
+
+Получить всех пользователей семьи
+
+users = self.db.query(User).filter(User.family_id == family_id).all()
+
+Результат
+ • список объектов User
+
+⸻
+
+Жёстко проверить, что email уникален
+
+user = self.db.query(User).filter(User.email == email).one_or_none()
+
+Результат
+ • один пользователь
+ • или None
+ • если в БД бардак и email дублируется — ошибка
+
+⸻
+
+Что тебе лучше использовать сейчас
+
+Для твоего текущего уровня и проекта:
+
+чаще всего:
+ • first()
+ • all()
+
+иногда:
+ • scalar()
+
+реже, но полезно:
+ • one_or_none()
+
+⸻
+
+Практическое правило для тебя
+
+Нужен объект → first()
+
+query(User)...first()
+
+Нужен список объектов → all()
+
+query(User)...all()
+
+Нужно одно поле → scalar()
+
+query(User.id)...scalar()
+
+Нужна строгая уникальность → one_or_none()
+
+query(User)...one_or_none()
+
+
+# END FILE CONTENTS
+
+
+# File: .gptree_config
+
+# GPTree Local Config
+version: 2
+
+# Whether to use .gitignore
+useGitIgnore: true
+# File types to include (e.g., .py,.js)
+includeFileTypes: *
+# File types to exclude when includeFileTypes is '*'
+excludeFileTypes: 
+# Output file name
+outputFile: gptree_output.txt
+# Whether to output the file locally or relative to the project directory
+outputFileLocally: true
+# Whether to copy the output to the clipboard
+copyToClipboard: false
+# Whether to use safe mode (prevent overly large files from being combined)
+safeMode: true
+# Whether to store the files chosen in the config file (--save, -s)
+storeFilesChosen: true
+# Whether to include line numbers in the output (--line-numbers, -n)
+lineNumbers: false
+# Whether to show ignored files in the directory tree
+showIgnoredInTree: false
+# Whether to show only default ignored files in the directory tree while still respecting gitignore
+showDefaultIgnoredInTree: false
+# Previously selected files (when using the -s or --save flag previously)
+previousFiles: 
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/family.py
+
+from sqlalchemy import BigInteger, DateTime, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
+from app.core.database import Base
+
+
+class Family(Base):
+    """EN: ORM model for the ``families`` table.
+
+    This class describes how a family group is represented in Python code
+    and how that representation maps to the database table.
+
+    RU: ORM-модель таблицы ``families``.
+
+    Этот класс показывает, как семейная группа выглядит в Python-коде
+    и как это описание связывается с одноимённой таблицей в базе данных.
+    """
+
+    __tablename__ = "families"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # время тут заполняет не Python-код.
+    # Его подставляет сама база данных, а это часто надёжнее и делает БД
+    # единым источником правды для технических временных меток.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+   
+    created_by: Mapped[int] = mapped_column(BigInteger)
+
+
+# END FILE CONTENTS
+
+
+# File: roadmap.md
+
+
+🎯 ШАГ 0 — Архитектура запуска (Docker-first)
+
+Ты будешь запускать систему как набор сервисов.
+Это уже мини-инфраструктура, а не просто приложение.
+
+⸻
+
+🧱 1. Состав системы (контейнеры)
+
+Минимальный набор:
+
+Обязательные сервисы
+
+ 1. backend
+ • FastAPI приложение
+ • бизнес-логика
+ 2. database
+ • PostgreSQL
+ • хранение данных
+ 3. reverse proxy
+ • HTTPS
+ • доступ из интернета
+ • (рекомендую Caddy)
+
+⸻
+
+Дополнительно (но закладываем сразу)
+ 4. storage (volume)
+ • файлы документов
+ 5. backup service (в будущем)
+ • резервные копии БД и файлов
+
+⸻
+
+🧠 Итоговая схема
+
+Internet
+   ↓
+[ Reverse Proxy (HTTPS) ]
+   ↓
+[ Backend (FastAPI) ]
+   ↓
+[ PostgreSQL ]
+
++ File Storage (volume)
+
+⸻
+
+📁 2. Структура проекта (очень важно)
+
+Ты сейчас закладываешь скелет на месяцы вперёд.
+
+Рекомендуемая структура
+
+home-secretary/
+│
+├── backend/
+│   ├── app/
+│   │   ├── core/          # конфиг, безопасность
+│   │   ├── models/        # модели БД
+│   │   ├── api/           # роуты
+│   │   ├── services/      # бизнес-логика
+│   │   ├── repositories/  # работа с БД
+│   │   └── modules/       # tasks, finance, docs (потом)
+│   │
+│   ├── requirements.txt
+│   └── Dockerfile
+│
+├── docker/
+│   ├── docker-compose.yml
+│   └── .env
+│
+├── storage/
+│   └── uploads/           # файлы пользователей
+│
+├── README.md
+└── .gitignore
+
+⸻
+
+🧠 Почему такая структура
+
+Это не “красиво”, а архитектурно правильно:
+
+Папка Назначение
+core безопасность, настройки
+models структура БД
+api входные точки
+services логика
+repositories работа с БД
+
+👉 Ты сразу разделяешь:
+ • что приходит (API)
+ • что делает (service)
+ • как хранится (repository)
+
+⸻
+
+⚠️ Типичная ошибка новичка
+
+❌ писать всё в одном файле
+❌ мешать логику и БД
+❌ не разделять слои
+
+👉 потом это невозможно масштабировать
+
+⸻
+
+🐳 3. Docker архитектура (логика)
+
+Ты НЕ пишешь пока compose, ты понимаешь:
+
+Сервис backend
+ • билдится из Dockerfile
+ • зависит от PostgreSQL
+ • получает настройки через .env
+
+⸻
+
+Сервис database
+ • postgres:latest
+ • volume для данных
+
+⸻
+
+Сервис proxy
+ • принимает HTTPS
+ • проксирует на backend
+
+⸻
+
+🔐 4. Переменные окружения (важно сразу)
+
+Ты должен сразу привыкать:
+
+никаких хардкодов
+
+Примеры (без кода):
+ • DATABASE_URL
+ • JWT_SECRET
+ • POSTGRES_USER
+ • POSTGRES_PASSWORD
+ • POSTGRES_DB
+
+⸻
+
+💾 5. Хранение данных
+
+База
+ • PostgreSQL volume
+
+Файлы
+ • storage/uploads/
+
+👉 это важно:
+файлы НЕ в контейнере, а в volume
+
+⸻
+
+⚠️ 6. Критические решения (фиксируем сейчас)
+
+⸻
+
+6.1. Backend = один сервис
+ • НЕ микросервисы
+ • НЕ разделение на 5 контейнеров
+
+👉 один backend
+
+⸻
+
+6.2. БД = отдельный контейнер
+
+👉 обязательно
+
+⸻
+
+6.3. Файлы = вне контейнера
+
+👉 иначе потеряешь данные при пересборке
+
+⸻
+
+6.4. Proxy обязателен
+
+Почему:
+ • HTTPS
+ • домен
+ • безопасность
+
+⸻
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/family_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.family import Family
+
+
+class FamilyRepository:
+    """EN: Repository for working with ``families`` table data.
+
+    The repository isolates database access logic so higher layers
+    do not have to build ORM queries directly.
+
+    RU: Репозиторий для работы с данными таблицы ``families``.
+
+    Репозиторий изолирует доступ к базе данных,
+    чтобы верхним слоям не приходилось писать ORM-запросы напрямую.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Store the active SQLAlchemy session inside the repository.
+
+        The repository will reuse this session in all its methods.
+
+        Args:
+            db: SQLAlchemy Session object used for queries, inserts, commits,
+                and refreshing ORM entities inside this repository.
+
+        RU: Сохраняет активную SQLAlchemy-сессию внутри репозитория.
+
+        Дальше все методы этого репозитория будут работать через неё.
+
+        Аргументы:
+            db: объект Session от SQLAlchemy, через который репозиторий
+                выполняет запросы, добавляет записи, делает commit
+                и обновляет ORM-объекты.
+        """
+
+        self.db = db
+
+    def get_family_by_name(self, name: str) -> Family | None:
+        """EN: Return the first family found by name or ``None``.
+
+        This method is useful when the caller wants one object
+        and is okay with getting nothing if no match exists.
+
+        Args:
+            name: Family name used in the filter condition.
+
+        Returns:
+            The first matching ``Family`` object or ``None``.
+
+        RU: Возвращает первую найденную семью по имени или ``None``.
+
+        Такой метод удобен, когда вызывающему коду нужен один объект
+        и нормально, если при отсутствии совпадения вернётся пустой результат.
+
+        Аргументы:
+            name: имя семьи, по которому строится фильтр.
+
+        Возвращает:
+            Первый найденный объект ``Family`` или ``None``.
+        """
+
+        return self.db.query(Family).filter(Family.name == name).first()
+
+    def create_family(self, name: str) -> Family:
+        """EN: Create a new family row, commit the transaction, and return it.
+
+        After commit the method refreshes the ORM object
+        so generated values from the database become available in Python.
+
+        Args:
+            name: Family name that will be written into the new row.
+
+        Returns:
+            Saved ``Family`` ORM object.
+
+        RU: Создаёт новую запись семьи, фиксирует транзакцию и возвращает объект.
+
+        После commit метод обновляет ORM-объект,
+        чтобы значения, сгенерированные базой данных, были доступны в Python.
+
+        Аргументы:
+            name: имя семьи, которое будет записано в новую строку.
+
+        Возвращает:
+            Сохранённый ORM-объект ``Family``.
+        """
+
+        family = Family(name=name)
+
+        self.db.add(family)
+       
+        return family
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/database.py
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+from app.core.config import DATABASE_URL
+
+
+# engine как "технический вход" в PostgreSQL:
+# он умеет открывать реальные подключения, но это ещё не тот объект,
+# через который обычно создают, читают и обновляют ORM-сущности.
+engine = create_engine(DATABASE_URL)
+
+# SessionLocal - это фабрика, а не готовая сессия. Каждый вызов SessionLocal() создаёт отдельный объект Session,
+# и уже эта Session становится рабочим столом для ORM-операций.
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+# Base - это общий родитель для ORM-моделей.
+# Как только класс наследуется от Base, SQLAlchemy начинает воспринимать его
+# как часть declarative-подхода и ждёт, что внутри будет описание таблицы.
+Base = declarative_base()
+
+def get_db():
+    """This function:
+    1. creates a new SQLAlchemy Session,
+    2. yields it to the caller (e.g. FastAPI dependency),
+    3. guarantees that the session is closed after use.
+
+    RU: Предоставляет сессию базы данных на время выполнения запроса.
+
+    Функция:
+    1. создаёт новую Session,
+    2. отдаёт её наружу (например, в endpoint или сервис),
+    3. гарантированно закрывает соединение после завершения работы.
+    """
+
+    # 1. создаём новую сессию через фабрику SessionLocal
+    # каждая сессия — это отдельное подключение/контекст работы с БД
+    db = SessionLocal()
+
+    try:
+        # 2. отдаём сессию наружу здесь выполнение "приостанавливается", и код, который вызвал get_db(),
+        # получает доступ к db (Session)
+        yield db
+
+    finally:
+        # 3. этот блок выполнится ВСЕГДА даже если внутри запроса произошла ошибка
+        # закрываем соединение с БД, чтобы не было утечек
+        db.close()
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/__init__.py
+
+
+
+# END FILE CONTENTS
+
+
+# File: docker/docker-compose.yml
+
+version: "3.9"
+
+services:
+
+  db:
+    image: postgres:16
+    container_name: home_secretary_bd
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+
+    ports:
+      - "5432:5432"
+
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/2.md
+
+
+Что такое repository
+
+Сначала короткая теория.
+
+Repository — это слой доступа к данным
+
+Он нужен, чтобы не писать SQL и работу с сессией прямо в endpoint или service.
+
+То есть repository отвечает на вопросы вроде:
+ • найди пользователя по email
+ • создай пользователя
+ • обнови пароль
+ • сохрани refresh token
+
+⸻
+
+Почему нельзя писать это сразу в API
+
+Если ты начнёшь делать так:
+ • endpoint принял запрос
+ • там же открыл сессию
+ • там же сделал запрос в БД
+ • там же создал пользователя
+ • там же сделал commit
+
+то получится каша.
+
+⸻
+
+Правильное разделение
+
+API -> Service -> Repository -> DB
+
+API
+
+принимает HTTP-запрос
+
+Service
+
+решает бизнес-логику
+
+Repository
+
+идёт в базу
+
+DB
+
+хранит данные
+
+⸻
+
+Что мы делаем сейчас
+
+Путь файла:
+
+backend/app/repositories/user_repository.py
+
+⸻
+
+Что будет в этом файле
+
+На первом шаге там будут:
+ • импорт Session
+ • импорт модели User
+ • класс UserRepository
+ • метод get_user_by_email
+ • метод create_user
+
+Мы создаём Python-объект ORM-модели User.
+
+Пока это ещё не “запись в базе”.
+Пока это просто объект в памяти Python.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/refresh_token.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.dialects.postgresql import INET
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class RefreshToken(Base):
+    """EN: ORM model for the ``refresh_tokens`` table.
+
+    It keeps long-lived refresh token records that can later be revoked,
+    checked for expiration, and linked back to a specific user.
+
+    RU: ORM-модель таблицы ``refresh_tokens``.
+
+    Она хранит записи о долгоживущих refresh token,
+    которые потом можно отзывать, проверять на истечение
+    и связывать с конкретным пользователем.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    
+    # если по дизайну в БД должен жить только hash, то сам "сырой" refresh token
+    # лучше вообще не хранить в таблице.
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # В PostgreSQL есть специальный тип ``INET`` для IP-адресов.
+    # Он выразительнее, чем просто хранить адрес как обычный текст.
+    ip_address: Mapped[str | None] = mapped_column(INET)
+
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/1.md
+
+
+Что мы сейчас строим
+
+Тебе нужен файл, который будет отвечать за 3 вещи:
+
+ 1. подключение к PostgreSQL
+ 2. создание “базового класса” для ORM-моделей
+ 3. создание сессий для работы с БД
+
+В SQLAlchemy это стандартная схема: create_engine() создаёт “двигатель” подключения, sessionmaker() создаёт фабрику сессий, а declarative_base() даёт базовый класс, от которого наследуются ORM-модели. Это базовый паттерн ORM в официальной документации SQLAlchemy.  ￼
+
+⸻
+
+Сначала теория простыми словами
+
+Что такое engine
+
+engine — это не “соединение с БД прямо сейчас”, а объект, который умеет подключаться к базе и управлять соединениями.
+Представь его как диспетчера доступа к PostgreSQL. Когда приложению понадобится база, оно попросит у engine соединение. Это соответствует тому, как SQLAlchemy описывает create_engine() и дальнейшую работу через Session.  ￼
+
+Что такое Session
+
+Session — это уже рабочий инструмент, через который твой код будет:
+ • читать данные,
+ • добавлять строки,
+ • изменять записи,
+ • делать commit/rollback.
+
+Если говорить очень грубо:
+engine = “доступ к кухне”,
+session = “рабочий стол, на котором ты готовишь”.
+В документации SQLAlchemy Session описывается как основной ORM-объект для разговора с базой.  ￼
+
+Что такое Base
+
+Base — это общий родитель для всех ORM-моделей.
+Когда ты потом напишешь класс User(Base), SQLAlchemy поймёт:
+ • это ORM-модель,
+ • у неё будет таблица,
+ • её поля соответствуют колонкам БД.
+
+Это и есть declarative mapping в SQLAlchemy.  ￼
+
+⸻
+
+Почему мы не пишем модели прямо сейчас
+
+Потому что модели должны на что-то опираться.
+
+Сначала нужен фундамент:
+ • строка подключения,
+ • engine,
+ • SessionLocal,
+ • Base.
+
+И только потом:
+ • User,
+ • Family,
+ • RefreshToken и так далее.
+
+Если начать с моделей без Base и без нормального подключения, получится каша.
+
+⸻
+
+Какой файл мы сейчас создаём
+
+Путь:
+
+backend/app/core/database.py
+
+⸻
+
+Что будет внутри файла
+
+В этом файле должны быть:
+
+ 1. импорт нужных частей SQLAlchemy
+ 2. переменная DATABASE_URL
+ 3. объект engine
+ 4. фабрика сессий SessionLocal
+ 5. базовый класс Base
+
+⸻
+
+Сразу важное решение
+
+Пока у тебя ещё нет config.py, мы временно зададим DATABASE_URL прямо в database.py.
+
+Это не идеал.
+Но это правильное временное упрощение, чтобы не расползаться на 5 файлов сразу.
+
+Позже мы вынесем это в настройки.
+
+⸻
+
+Как выглядит строка подключения к PostgreSQL
+
+Для SQLAlchemy она обычно выглядит так:
+
+postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME
+
+Это зависит от драйвера. Для PostgreSQL SQLAlchemy использует диалект PostgreSQL, а дальше нужен DBAPI-драйвер. В современных проектах часто используют psycopg/psycopg3, и строка подключения задаётся через SQLAlchemy URL.  ￼
+
+Для твоего локального docker-сценария логика будет такой:
+ • пользователь: home_secretary
+ • пароль: твой пароль из .env
+ • хост: localhost или имя сервиса db — зависит от того, откуда подключаешься
+ • порт: 5432
+ • база: home_secretary
+
+⸻
+
+Очень важный момент про host
+
+Если Python-приложение запускается:
+
+снаружи Docker, на твоём компьютере
+
+то host обычно будет:
+
+localhost
+
+внутри Docker Compose, в другом контейнере
+
+то host должен быть:
+
+db
+
+Потому что db — это имя сервиса в compose-сети.
+
+Сейчас, пока ты не запускаешь всё целиком, можно временно взять localhost.
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/fast_api.md
+
+
+FastAPI — это инструмент для создания backend-приложений, которые принимают запросы по сети и возвращают ответы.
+
+Если совсем просто:
+
+FastAPI = способ сделать "сервер, который умеет разговаривать с клиентами"
+
+Клиентами могут быть:
+ • браузер
+ • мобильное приложение
+ • другой сервер
+ • JavaScript на сайте
+ • Telegram-бот
+ • программа на Python
+ • Postman
+
+⸻
+
+Что значит backend
+
+Представь обычный сайт.
+
+У него есть две части:
+
+1. Frontend
+
+Это то, что видит пользователь:
+ • кнопки
+ • формы
+ • картинки
+ • страницы
+
+1. Backend
+
+Это то, что работает “за кулисами”:
+ • принимает логин и пароль
+ • проверяет пользователя
+ • сохраняет данные
+ • отдаёт список задач
+ • создаёт заказ
+ • ищет товары
+ • считает статистику
+
+FastAPI — это как раз инструмент для написания backend.
+
+⸻
+
+Самая простая аналогия
+
+Представь ресторан.
+
+Клиент
+
+Приходит и говорит:
+ • “принесите меню”
+ • “хочу суп”
+ • “счёт, пожалуйста”
+
+Кухня
+
+Готовит еду.
+
+Официант
+
+Принимает заказ, передаёт его на кухню и возвращает результат клиенту.
+
+В этой аналогии:
+ • клиент — это браузер или приложение
+ • кухня — это твоя бизнес-логика и база данных
+ • FastAPI — это как очень умный официант, который:
+ • принимает запрос
+ • понимает, чего от него хотят
+ • вызывает нужную логику
+ • возвращает ответ
+
+⸻
+
+Что такое API
+
+Теперь самое важное слово.
+
+API — это правила общения между программами.
+
+Если два человека говорят по-русски, они понимают друг друга.
+Если два приложения работают через API, они тоже понимают друг друга по заранее оговорённым правилам.
+
+Например:
+ • клиент отправляет запрос: “дай список книг”
+ • сервер отвечает: “вот список книг”
+
+То есть API — это не “что-то абстрактное”, а просто договорённость, как задавать вопросы и как возвращать ответы.
+
+⸻
+
+Что делает FastAPI по шагам
+
+Когда приходит запрос, FastAPI делает примерно следующее:
+
+1. Принимает запрос
+
+Например:
+ • открыть список товаров
+ • создать пользователя
+ • войти в аккаунт
+
+1. Понимает, какой обработчик нужен
+
+То есть он решает:
+“ага, для такого запроса надо вызвать вот эту функцию”
+
+1. Разбирает входные данные
+
+Например:
+ • email
+ • пароль
+ • id товара
+ • количество
+
+1. Проверяет, всё ли пришло правильно
+
+Например:
+ • не забыли ли поле
+ • строка это или число
+ • не пустой ли запрос
+
+1. Передаёт данные в твою логику
+
+Например:
+ • проверить пользователя
+ • найти запись в базе
+ • вернуть результат
+
+1. Возвращает ответ клиенту
+
+Например:
+ • “успешно”
+ • список данных
+ • ошибка
+
+⸻
+
+Что такое HTTP и почему он тут везде
+
+FastAPI работает поверх HTTP.
+
+HTTP — это язык, на котором браузеры и серверы общаются друг с другом.
+
+Когда ты открываешь сайт, отправляешь форму, нажимаешь кнопку — там почти всегда в фоне идёт HTTP.
+
+⸻
+
+Из чего состоит HTTP-запрос
+
+Очень упрощённо:
+
+1. Метод
+
+Он показывает, что клиент хочет сделать.
+
+Самые важные:
+
+GET
+
+Получить данные
+
+Пример:
+ • получить список фильмов
+ • получить погоду
+ • открыть страницу профиля
+
+POST
+
+Создать что-то новое или отправить данные на обработку
+
+Пример:
+ • регистрация
+ • логин
+ • создать заметку
+
+PUT / PATCH
+
+Изменить существующие данные
+
+Пример:
+ • изменить имя пользователя
+ • обновить статус задачи
+
+DELETE
+
+Удалить данные
+
+Пример:
+ • удалить комментарий
+ • удалить задачу
+
+⸻
+
+1. Адрес
+
+Например:
+ • /books
+ • /users
+ • /login
+
+Это путь, по которому клиент обращается.
+
+⸻
+
+1. Заголовки
+
+Дополнительная служебная информация.
+
+Например:
+ • какой тип данных отправляется
+ • токен авторизации
+ • язык
+ • тип клиента
+
+⸻
+
+1. Тело запроса
+
+Это сами данные.
+
+Например:
+ • email
+ • пароль
+ • текст комментария
+ • название книги
+
+⸻
+
+Что такое endpoint
+
+Endpoint — это конкретная точка входа.
+
+Например:
+ • GET /books
+ • POST /books
+ • GET /books/5
+ • DELETE /books/5
+
+Каждый такой endpoint отвечает за свой конкретный сценарий.
+
+Простая логика:
+
+метод + путь = endpoint
+
+⸻
+
+Живой пример без твоего проекта
+
+Представь сервис библиотеки.
+
+Что можно делать?
+
+1. Получить список книг
+
+Клиент спрашивает:
+“покажи все книги”
+
+Это один endpoint.
+
+⸻
+
+1. Получить одну книгу
+
+Клиент спрашивает:
+“покажи книгу с id 7”
+
+Это другой endpoint.
+
+⸻
+
+1. Добавить новую книгу
+
+Клиент присылает:
+ • название
+ • автора
+ • год
+
+Это третий endpoint.
+
+⸻
+
+1. Удалить книгу
+
+Клиент говорит:
+“удали книгу 7”
+
+Это четвёртый endpoint.
+
+⸻
+
+Чем FastAPI отличается от “просто функции Python”
+
+Обычная функция Python живёт внутри программы и сама по себе не умеет принимать запросы по сети.
+
+FastAPI делает так, что твоя функция становится доступной извне.
+
+То есть не ты руками вызываешь:
+
+get_books()
+
+а клиент по сети вызывает endpoint, а FastAPI уже сам вызывает твою функцию.
+
+⸻
+
+Что значит “сервер”
+
+Когда говорят “запустить FastAPI-сервер”, имеют в виду:
+
+программа начинает слушать порт и ждать HTTP-запросов
+
+Представь дежурного на проходной:
+ • пока никого нет — он просто ждёт
+ • как только кто-то пришёл — проверяет, что нужно
+ • передаёт запрос дальше
+ • возвращает ответ
+
+Сервер — это вот такой постоянно работающий “дежурный”.
+
+⸻
+
+Что значит “порт”
+
+Порт — это условный номер двери у сервера.
+
+Например:
+ • сервер работает на машине
+ • у машины есть IP
+ • у приложения есть порт
+
+Если упростить:
+
+IP = адрес дома
+порт = номер квартиры
+
+То есть запрос идёт не просто “на сервер”, а на конкретное приложение на этом сервере.
+
+⸻
+
+Как выглядит типичный сценарий в FastAPI
+
+Разберём на бытовом примере.
+
+Сценарий: список фильмов
+
+Шаг 1
+
+Клиент отправляет запрос:
+“дай список фильмов”
+
+Шаг 2
+
+FastAPI понимает:
+“это запрос к endpoint списка фильмов”
+
+Шаг 3
+
+FastAPI вызывает нужную функцию
+
+Шаг 4
+
+Функция:
+ • идёт в базу
+ • получает фильмы
+ • формирует ответ
+
+Шаг 5
+
+FastAPI отдаёт клиенту JSON
+
+⸻
+
+Что такое JSON
+
+JSON — это просто стандартный формат данных.
+
+Он нужен, чтобы программы могли удобно обмениваться информацией.
+
+Очень грубо:
+ • словарь Python похож на JSON
+ • список Python тоже похож на JSON
+
+Клиент и сервер часто общаются именно JSON-данными.
+
+⸻
+
+Почему FastAPI считается удобным
+
+Есть несколько причин.
+
+1. Понятная структура
+
+Ты довольно ясно описываешь:
+ • какой endpoint
+ • какие данные он ждёт
+ • что он возвращает
+
+1. Автоматическая валидация
+
+FastAPI умеет сам проверять, правильно ли пришли данные.
+
+1. Автоматическая документация
+
+Он умеет сам строить страницу, где видно:
+ • какие endpoint есть
+ • какие поля нужно передавать
+ • какие ответы возможны
+
+Это очень удобно для обучения и тестирования.
+
+1. Хорошо подходит для API
+
+Он изначально заточен под backend и API-сервисы.
+
+⸻
+
+Когда FastAPI особенно полезен
+
+FastAPI хорош, когда ты делаешь:
+ • backend для сайта
+ • backend для мобильного приложения
+ • API для Telegram-бота
+ • сервис авторизации
+ • систему задач
+ • медицинскую систему
+ • панель управления
+ • сервис аналитики
+ • внутренний корпоративный API
+
+⸻
+
+Когда FastAPI — не “волшебство”
+
+Очень важно понять: FastAPI сам по себе не делает бизнес-логику за тебя.
+
+Он не знает:
+ • как проверять пароль
+ • как строить авторизацию
+ • как хранить пользователей
+ • как работать с PostgreSQL
+
+Это всё пишешь ты.
+
+FastAPI делает другое:
+ • даёт входную дверь
+ • распределяет запросы
+ • проверяет форму данных
+ • помогает возвращать ответы
+
+⸻
+
+Простая схема всего приложения
+
+Вот так можно мысленно представить backend на FastAPI:
+
+клиент
+   ↓
+FastAPI endpoint
+   ↓
+service
+   ↓
+repository
+   ↓
+database
+
+Где:
+
+FastAPI endpoint
+
+Принимает запрос и возвращает ответ.
+
+Service
+
+Делает бизнес-логику.
+
+Repository
+
+Работает с БД.
+
+Database
+
+Хранит данные.
+
+⸻
+
+Как думает клиент при работе с FastAPI
+
+Клиент вообще не знает, какие у тебя внутри:
+ • классы
+ • функции
+ • декораторы
+ • SQLAlchemy
+ • PostgreSQL
+
+Клиент знает только:
+
+есть адрес
+есть метод
+есть данные
+есть ответ
+
+Например:
+ • отправить логин и пароль
+ • получить access token
+ • запросить список книг
+ • отправить новую запись
+
+То есть FastAPI делает твой backend “видимым” для внешнего мира.
+
+⸻
+
+Какие части FastAPI тебе потом придётся изучить
+
+Чтобы ты понимал картину заранее.
+
+1. Endpoints
+
+Как объявлять точки входа.
+
+1. Request/Response schemas
+
+Как описывать вход и выход.
+
+1. Dependency Injection
+
+Как передавать в endpoint:
+ • db session
+ • current user
+ • настройки
+ • сервисы
+
+1. Status codes
+
+Как возвращать:
+ • успех
+ • ошибка
+ • не найдено
+ • неавторизован
+
+1. Authentication / Authorization
+
+Как защищать endpoint’ы.
+
+1. Middleware
+
+Как делать общую обработку запросов.
+
+1. Documentation
+
+Как использовать встроенную документацию.
+
+⸻
+
+Что важно понять прямо сейчас
+
+На этом этапе тебе нужно не всё сразу, а три главные мысли:
+
+1. FastAPI — это входная дверь в backend
+
+Он принимает запросы и вызывает твою логику.
+
+1. Endpoint — это конкретный сценарий
+
+Например:
+ • получить данные
+ • создать запись
+ • войти
+ • выйти
+
+1. FastAPI не заменяет твою логику
+
+Он не делает backend сам.
+Он просто удобно организует взаимодействие с клиентом.
+
+⸻
+
+Аналогия “почта”
+
+Ещё одна аналогия, очень полезная.
+
+Представь почтовое отделение.
+
+Клиент
+
+Приносит письмо или заявление.
+
+FastAPI
+
+Это сотрудник приёма:
+ • принимает документ
+ • смотрит, куда его направить
+ • проверяет, всё ли приложено
+ • отправляет в нужный отдел
+
+Service
+
+Это уже внутренний отдел, который реально решает вопрос.
+
+То есть FastAPI не “решает” задачу.
+Он организует правильное попадание задачи в систему.
+
+⸻
+
+Частая ошибка новичка
+
+Новичок часто думает:
+
+FastAPI = вся программа
+
+Это не так.
+
+Правильнее:
+
+FastAPI = HTTP-слой над твоей программой
+
+То есть это верхняя часть системы, а не вся система целиком.
+
+⸻
+
+Самый короткий итог
+
+FastAPI — это инструмент, который позволяет:
+ • принимать HTTP-запросы
+ • связывать их с Python-функциями
+ • валидировать входные данные
+ • возвращать ответы клиенту
+ • строить backend API быстро и понятно
+
+⸻
+
+
+# END FILE CONTENTS
+
+
+# File: errors.md
+
+# Critical Errors Log
+
+Этот файл собирает критические ошибки, которые находились в ходе предыдущих аудитов проекта.
+
+Важно:
+- список составлен по моим прошлым ответам в этой переписке;
+- сюда включены как актуальные, так и уже исправленные критические проблемы;
+- для удобства у каждой записи есть статус: `open`, `fixed`, `partially fixed`, `needs recheck`.
+
+---
+
+## 1. `auth_service.py` импортировал функции сам из себя
+
+- Статус: `fixed`
+- Где было: `backend/app/services/auth_service.py`
+
+Описание:
+- В одном из ранних состояний `auth_service.py` импортировал `create_access_token`, `create_refresh_token`, `hash_token`, `verify_password`, `get_password_hash` из `app.services.auth_service`, то есть из самого себя.
+- Это создавало ошибочную зависимость и ломало импорт auth-слоя.
+
+Почему это критично:
+- модуль мог не импортироваться вообще;
+- backend не смог бы нормально стартовать.
+
+Что было предложено:
+- импортировать security-функции из `backend/app/core/security.py`.
+
+---
+
+## 2. `refresh_access_token()` использовал `res.email`, которого нет у `RefreshToken`
+
+- Статус: `fixed`
+- Где было: `backend/app/services/auth_service.py`
+
+Описание:
+- В ветках refresh flow использовалось обращение к `res.email`.
+- Но объект `RefreshToken` не содержит поля `email`.
+
+Почему это критично:
+- при выполнении refresh сценария возникал бы `AttributeError`;
+- обновление access token не работало бы в части error-веток.
+
+Что было предложено:
+- использовать уже найденный `email`/`user.email`, а не поле токена.
+
+---
+
+## 3. `config.py` генерировал новый `secret_key` при каждом импорте
+
+- Статус: `fixed`
+- Где было: `config.py`
+
+Описание:
+- На раннем этапе `secret_key` создавался через `secrets.token_urlsafe(32)` прямо при импорте.
+
+Почему это критично:
+- после каждого рестарта все ранее выданные JWT становились недействительными;
+- auth-механизм был нестабилен.
+
+Что было предложено:
+- читать `SECRET_KEY` из `.env` через конфиг.
+
+---
+
+## 4. `requirements.txt` был оформлен как набор команд `pip install ...`
+
+- Статус: `open`
+- Где было: `backend/requirements.txt`
+
+Описание:
+- Вместо списка зависимостей файл содержал shell-команды вида `pip install ...`.
+
+Почему это критично:
+- `pip install -r requirements.txt` в таком виде не работает;
+- окружение проекта нельзя поднять стандартным способом.
+
+Что было предложено:
+- оставить в файле только имена пакетов и версии, без префикса `pip install`.
+
+---
+
+## 5. Несовместимость `sub` и `user_id` в JWT
+
+- Статус: `fixed`
+- Где было:
+  - `backend/app/core/security.py`
+  - `backend/app/services/auth_service.py`
+
+Описание:
+- `create_access_token()` записывал в JWT `sub`,
+- а `decode_access_token()` и `get_current_user()` ожидали `user_id`.
+
+Почему это критично:
+- даже валидный access token не позволял получить текущего пользователя;
+- `/auth/me` ломался на runtime.
+
+Что было предложено:
+- привести формат payload к одному стандарту;
+- позже это было закрыто добавлением согласованного чтения `user_id`.
+
+---
+
+## 6. `validation_password()` была сломана и не возвращала валидное значение
+
+- Статус: `fixed`
+- Где было: `backend/app/core/security.py`
+
+Описание:
+- В одном из состояний функция содержала ошибочную вложенную структуру и фактически не возвращала пароль после проверки.
+
+Почему это критично:
+- `get_password_hash()` получал `None`;
+- регистрация и смена пароля рушились на этапе хеширования.
+
+Что было предложено:
+- привести функцию к обычной линейной валидации с явным `return password`.
+
+---
+
+## 7. `validate_refresh_token()` вызывалась с неверным числом аргументов
+
+- Статус: `fixed`
+- Где было: `backend/app/services/auth_service.py`
+
+Описание:
+- В одном из ранних состояний сигнатура функции и реальные вызовы расходились.
+
+Почему это критично:
+- при первом же вызове refresh или logout возникал бы `TypeError`.
+
+Что было предложено:
+- синхронизировать сигнатуру функции и её вызовы.
+
+---
+
+## 8. `logout_user()` передавал в `revoke_refresh_token()` не тот тип аргумента
+
+- Статус: `fixed`
+- Где было:
+  - `backend/app/services/auth_service.py`
+  - `backend/app/repositories/refresh_token_repository.py`
+
+Описание:
+- Ранее обсуждался вариант, где сервис передавал не то значение, которое ожидал репозиторий.
+- Позже логика была перестроена так, что репозиторий принимает ORM-объект токена.
+
+Почему это критично:
+- logout flow мог не отзывать refresh token.
+
+Что было предложено:
+- синхронизировать контракт сервиса и репозитория.
+
+---
+
+## 9. Смешение транзакционной логики между сервисами и репозиториями
+
+- Статус: `partially fixed`
+- Где было:
+  - `backend/app/services/auth_service.py`
+  - `backend/app/repositories/family_repository.py`
+  - `backend/app/repositories/password_reset_repository.py`
+  - `backend/app/repositories/audit_log_repository.py`
+
+Описание:
+- В проекте одновременно использовались:
+  - декоратор `@transactional` на уровне сервисов;
+  - `commit()` внутри отдельных репозиториев.
+
+Почему это критично:
+- нарушалась атомарность сценариев;
+- часть данных могла сохраниться, даже если поздний шаг бизнес-логики упал;
+- rollback не гарантировал полный откат сценария.
+
+Что было предложено:
+- оставить `commit()/rollback()` только на одном уровне;
+- репозитории сделать “немыми” относительно финального коммита.
+
+Что изменилось позже:
+- часть репозиториев была приведена к этой модели;
+- отдельная оптимизация для audit error-path была добавлена;
+- но архитектуру транзакций всё равно нужно держать под контролем при дальнейшем расширении.
+
+---
+
+## 10. Audit log на error-path откатывался вместе с основной транзакцией
+
+- Статус: `fixed`
+- Где было: `backend/app/services/auth_service.py`
+
+Описание:
+- Ошибки логина, refresh и других auth-сценариев писались в ту же транзакцию, что и основная бизнес-логика.
+- Затем при `rollback()` запись из аудита тоже откатывалась.
+
+Почему это критично:
+- в самых важных security-сценариях журнал ошибок мог просто пропадать.
+
+Что было предложено:
+- писать audit для error-path через отдельную сессию и отдельный commit.
+
+Что было сделано позже:
+- добавлен helper для независимой записи audit-событий.
+
+---
+
+## 11. Для password reset использовался генератор refresh token
+
+- Статус: `fixed`
+- Где было:
+  - `backend/app/services/auth_service.py`
+  - `backend/app/core/security.py`
+
+Описание:
+- Токен сброса пароля создавался через `create_refresh_token()`.
+
+Почему это критично:
+- два разных типа токенов не были разведены по смыслу;
+- auth-слой становился уязвимее и хуже масштабировался.
+
+Что было предложено:
+- выделить отдельную функцию `create_reset_token()`.
+
+---
+
+## 12. `RESET_TOKEN_EXPIRE_MINUTES` не приводился к `int`
+
+- Статус: `fixed`
+- Где было: `config.py`
+
+Описание:
+- Значение бралось из env как строка и затем использовалось в `timedelta(minutes=...)`.
+
+Почему это критично:
+- на runtime это вызывало бы ошибку типа.
+
+Что было предложено:
+- привести значение к `int` сразу в конфиге.
+
+---
+
+## 13. `AccessTokenNotFound` и другие auth-ошибки отсутствовали в `errors.py`
+
+- Статус: `fixed`
+- Где было:
+  - `backend/app/core/errors.py`
+  - `backend/app/services/auth_service.py`
+
+Описание:
+- В одном из состояний сервис импортировал классы ошибок, которых не было в модуле `errors.py`.
+
+Почему это критично:
+- импорт auth-сервиса падал;
+- backend не мог стартовать.
+
+Что было предложено:
+- добавить недостающие классы ошибок в `errors.py`.
+
+---
+
+## 14. `Family` использовался в type annotation без импорта
+
+- Статус: `fixed`
+- Где было: `backend/app/services/auth_service.py`
+
+Описание:
+- Функция `register_family()` использовала аннотацию `-> Family`,
+- но `Family` в модуле не был импортирован.
+
+Почему это критично:
+- импорт `app.services.auth_service` падает с `NameError`;
+- вместе с этим не поднимается точка входа приложения.
+
+Что изменилось:
+- `Family` был импортирован в модуле сервиса;
+- повторная проверка импорта после правки проходит успешно.
+
+---
+
+## 15. Модуль `config.py` не находится при стандартном запуске backend
+
+- Статус: `fixed`
+- Где было:
+  - `backend/app/core/database.py`
+  - `backend/app/core/security.py`
+  - `backend/app/services/auth_service.py`
+  - `backend/main.py`
+
+Описание:
+- Несколько модулей делали `from config import ...`,
+- из-за чего при стандартном запуске backend модуль конфигурации не находился.
+
+Почему это критично:
+- при обычном запуске `python3 backend/main.py` приложение падает с:
+  `ModuleNotFoundError: No module named 'config'`.
+
+Что изменилось:
+- импорты были переведены на `from app.core.config import ...`;
+- повторная проверка показала, что `import main` теперь проходит успешно.
+
+---
+
+## 16. Декоратор `@transactional` падает при вызове сервисов через keyword arguments
+
+- Статус: `open`
+- Где сейчас:
+  - `backend/app/services/auth_service.py`
+  - `backend/app/api/auth.py`
+
+Описание:
+- Декоратор `@transactional` берёт сессию только как `args[0]`.
+- Но API вызывает сервисы в стиле `login_user(db=db, ...)`, `register_user(db=db, ...)`, то есть через именованные аргументы.
+- В таком случае `args` оказывается пустым, и декоратор падает на `args[0]`.
+
+Почему это критично:
+- все сервисные функции с `@transactional` становятся неработоспособными при текущем способе вызова из API;
+- это ломает register/login/refresh/logout/password-reset ещё до выполнения бизнес-логики.
+
+Подтверждение:
+- ошибка подтверждена прямым вызовом декорированной функции в стиле `register_user(db=..., ...)`;
+- фактическая ошибка: `IndexError: tuple index out of range`.
+
+---
+
+## 17. API-слой не преобразует сервисные auth-ошибки в HTTP 4xx
+
+- Статус: `open`
+- Где сейчас:
+  - `backend/app/api/auth.py`
+  - `backend/main.py`
+
+Описание:
+- API вызывает сервисы напрямую;
+- сервисы бросают `ValueError` и `AuthError`;
+- глобальных exception handlers нет;
+- в самих endpoint тоже нет оборачивания этих ошибок в `HTTPException`.
+
+Почему это критично:
+- штатные auth-ошибки будут уходить в `500 Internal Server Error`,
+- хотя должны возвращаться как `400/401/403/...`.
+
+Примеры сценариев:
+- неверный пароль;
+- несуществующий refresh token;
+- просроченный reset token;
+- access token без пользователя.
+
+---
+
+## 18. `family.created_by` и создание семьи были рассинхронизированы
+
+- Статус: `needs recheck`
+- Где было:
+  - `backend/app/models/family.py`
+  - `backend/app/repositories/family_repository.py`
+  - `docker/init/001_init.sql`
+
+Описание:
+- В модели `Family` поле `created_by` выглядело обязательным,
+- а семья создавалась без передачи этого значения.
+- При этом в SQL init-файле колонка описана без `NOT NULL`.
+
+Почему это считалось критичным:
+- если схема создавалась бы по ORM-модели, а не по init SQL, могла возникнуть ошибка вставки.
+
+Почему статус не окончательный:
+- здесь есть расхождение между ORM-моделью и SQL-схемой;
+- нужен отдельный повторный контроль того, какой источник схемы используется в реальном запуске.
+
+---
+
+## 19. Жёсткая валидация env-переменных на этапе импорта
+
+- Статус: `needs recheck`
+- Где сейчас: `config.py`
+
+Описание:
+- `config.py` бросает `ValueError`, если обязательные env не заданы.
+
+Почему это считалось критичным в одном из аудитов:
+- без env невозможно даже импортировать security/auth-модули.
+
+Почему статус спорный:
+- с одной стороны, это реально блокирует запуск без настроек;
+- с другой стороны, такое поведение может быть осознанным и правильным для fail-fast конфигурации.
+
+Итог:
+- это скорее не “ошибка логики”, а важное проектное решение;
+- при следующем аудите стоит проверять уже в контексте принятой стратегии запуска.
+
+---
+
+## Краткий итог
+
+На момент последнего аудита наиболее актуальными критическими ошибками оставались:
+
+1. падение `@transactional` при вызове сервисов через keyword arguments;
+2. отсутствие нормального преобразования сервисных auth-ошибок в HTTP-ответы уровня `4xx`.
+
+Проблемы с неимпортированным `Family` и со старым импортом `config` уже закрыты.
+Остальные критические проблемы из прошлых ревью были либо исправлены, либо требуют повторной проверки уже в новом состоянии проекта.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/config.py
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+# === CORE SETTINGS ===
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+# === TOKEN SETTINGS ===
+
+ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
+REFRESH_TOKEN_EXPIRE_DAYS = os.getenv("REFRESH_TOKEN_EXPIRE_DAYS")
+RESET_TOKEN_EXPIRE_MINUTES  = os.getenv('RESET_TOKEN_EXPIRE_MINUTES')
+
+
+# === VALIDATION ===
+
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY is not set")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set")
+
+if not ACCESS_TOKEN_EXPIRE_MINUTES:
+    raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES is not set")
+
+if not REFRESH_TOKEN_EXPIRE_DAYS:
+    raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS is not set")
+if not RESET_TOKEN_EXPIRE_MINUTES:
+    raise ValueError("RESET_TOKEN_EXPIRE_MINUTES is not set")
+
+
+# === TYPE CASTING ===
+
+ACCESS_TOKEN_EXPIRE_MINUTES = int(ACCESS_TOKEN_EXPIRE_MINUTES)
+REFRESH_TOKEN_EXPIRE_DAYS = int(REFRESH_TOKEN_EXPIRE_DAYS)
+RESET_TOKEN_EXPIRE_MINUTES = int(RESET_TOKEN_EXPIRE_MINUTES)
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/password_reset_repository.py
+
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.password_reset_token import PasswordResetToken
+
+
+class PasswordResetTokenRepository:
+    """EN: Repository for database operations on ``password_reset_tokens``.
+
+    This class keeps reset-token queries together:
+    create, search, read hash values, and mark tokens as used.
+
+    RU: Репозиторий для операций с базой данных над ``password_reset_tokens``.
+
+    Этот класс держит запросы к reset-token в одном месте:
+    создание, поиск, чтение hash-значений и пометка токенов как использованных.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Store the active session used for password reset token queries.
+
+        Args:
+            db: Active SQLAlchemy session used by this repository.
+
+        RU: Сохраняет активную сессию, через которую выполняются запросы к токенам сброса.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия, через которую работает репозиторий.
+        """
+
+        self.db = db
+
+    def get_token_hash_by_user_id(self, user_id: int) -> str | None:
+        """EN: Return only the token hash for a user or ``None``.
+
+        Notice that this query asks not for the whole ORM object,
+        but for one scalar value from one column.
+
+        Args:
+            user_id: Identifier of the user whose token hash is requested.
+
+        Returns:
+            Token hash string or ``None``.
+
+        RU: Возвращает только hash токена пользователя или ``None``.
+
+        Обрати внимание: этот запрос просит не целый ORM-объект,
+        а одно скалярное значение из одной колонки.
+
+        Аргументы:
+            user_id: идентификатор пользователя, для которого ищется hash токена.
+
+        Возвращает:
+            Строку с hash токена или ``None``.
+        """
+
+        return (
+            self.db.query(PasswordResetToken.token_hash)
+            .filter(PasswordResetToken.user_id == user_id)
+            .scalar()
+        )
+
+    def create_password_reset_token(
+        self,
+        user_id: int,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> PasswordResetToken:
+        """EN: Create a password reset token row and return the saved ORM object.
+
+        Args:
+            user_id: User identifier.
+            token_hash: Hashed reset token value.
+            expires_at: Expiration datetime for the reset token.
+
+        Returns:
+            Saved ``PasswordResetToken`` ORM object.
+
+        RU: Создаёт запись токена сброса пароля и возвращает сохранённый ORM-объект.
+
+        Аргументы:
+            user_id: идентификатор пользователя.
+            token_hash: хеш токена сброса пароля.
+            expires_at: дата и время истечения токена.
+
+        Возвращает:
+            Сохранённый ORM-объект ``PasswordResetToken``.
+        """
+
+        password_reset_token = PasswordResetToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+
+        self.db.add(password_reset_token)
+        
+
+        return password_reset_token
+
+    def get_password_reset_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> PasswordResetToken | None:
+        """EN: Find a reset token row by its hash and return it or ``None``.
+
+        Args:
+            token_hash: Hash value used to find the row.
+
+        Returns:
+            Matching ``PasswordResetToken`` or ``None``.
+
+        RU: Ищет запись токена по его hash и возвращает объект или ``None``.
+
+        Аргументы:
+            token_hash: hash-значение, по которому ищется запись.
+
+        Возвращает:
+            Найденный ``PasswordResetToken`` или ``None``.
+        """
+
+        return (
+            self.db.query(PasswordResetToken)
+            .filter(PasswordResetToken.token_hash == token_hash)
+            .first()
+        )
+
+    def mark_token_as_used(self, token_hash: str) -> PasswordResetToken | None:
+        """EN: Mark a reset token as used if it exists and return the updated row.
+
+        The method first loads the token, then changes the ``used_at`` field,
+        commits the transaction, and refreshes the ORM object.
+
+        Args:
+            token_hash: Hash of the token that should be marked as used.
+
+        Returns:
+            Updated ``PasswordResetToken`` object or ``None``.
+
+        RU: Помечает токен использованным, если он найден, и возвращает обновлённую запись.
+
+        Метод сначала загружает токен, затем меняет поле ``used_at``,
+        фиксирует транзакцию и обновляет ORM-объект.
+
+        Аргументы:
+            token_hash: hash токена, который нужно пометить как использованный.
+
+        Возвращает:
+            Обновлённый объект ``PasswordResetToken`` или ``None``.
+        """
+
+        token = (
+            self.db.query(PasswordResetToken)
+            .filter(PasswordResetToken.token_hash == token_hash)
+            .first()
+        )
+
+        if token is None:
+            return None
+
+        # Эта строка - момент "изменения состояния":
+        # сначала меняется ORM-объект в памяти,
+        # и только после ``commit`` это изменение становится постоянным в БД.
+        token.used_at = datetime.now()
+
+        return token
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/api/auth.py
+
+from fastapi import APIRouter, Depends, Request, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.schemas.auth import (LoginRequest, 
+                              TokenResponse, 
+                              RegisterRequest, 
+                              RefreshRequest, 
+                              AccessTokenResponse, 
+                              LogoutRequest,
+                              MessageResponse,
+                              PasswordResetRequest,
+                              PasswordResetConfirmRequest)
+from app.schemas.user import UserResponse, MeResponse
+from app.services.auth_service import (login_user, 
+                                       register_user, 
+                                       refresh_access_token, 
+                                       logout_user,
+                                       request_password_reset,
+                                       confirm_password_reset,
+                                       get_current_user)
+
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/login", response_model=TokenResponse)
+def login_endpoint(
+    data: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """EN: Authenticate a user and return access/refresh tokens.
+
+    Args:
+        data: Login payload with email and password.
+        request: FastAPI request object used to read client metadata.
+        db: Active database session dependency.
+
+    Returns:
+        Token response produced by the auth service.
+
+    RU: Аутентифицирует пользователя и возвращает access/refresh токены.
+
+    Аргументы:
+        data: payload входа с email и паролем.
+        request: объект запроса FastAPI для чтения клиентских метаданных.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Ответ с токенами, который формирует auth service.
+    """
+
+    result = login_user(
+        db=db,
+        email=data.email,
+        password=data.password,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
+
+
+@router.post('/register', response_model=UserResponse)
+def registr_endpoint(
+    data: RegisterRequest,
+    db: Session = Depends(get_db),
+):
+    """EN: Register a new user through the auth service.
+
+    Args:
+        data: Registration payload with email, password, and family name.
+        db: Active database session dependency.
+
+    Returns:
+        Created user representation.
+
+    RU: Регистрирует нового пользователя через auth service.
+
+    Аргументы:
+        data: payload регистрации с email, паролем и именем семьи.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Представление созданного пользователя.
+    """
+
+    result = register_user(
+        db=db,
+        email=data.email,
+        password=data.password,
+        family_name=data.family_name,
+    )
+    return result 
+
+
+@router.post('/refresh', response_model=AccessTokenResponse)
+def refresh_endpoint(
+    data: RefreshRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """EN: Exchange a valid refresh token for a new access token.
+
+    Args:
+        data: Request body with refresh token.
+        request: FastAPI request object used to read client IP.
+        db: Active database session dependency.
+
+    Returns:
+        Dictionary with a new access token.
+
+    RU: Обменивает валидный refresh token на новый access token.
+
+    Аргументы:
+        data: тело запроса с refresh token.
+        request: объект запроса FastAPI для чтения IP клиента.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Словарь с новым access token.
+    """
+
+    result = refresh_access_token(
+        db=db,
+        refresh_token=data.refresh_token,
+        ip_address=request.client.host if request.client else None
+    )
+
+    return {"access_token": result}
+
+@router.post('/logout', response_model=MessageResponse)
+def logout_endpoint(
+    data: LogoutRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """EN: Revoke a refresh token and finish the logout flow.
+
+    Args:
+        data: Request body with refresh token.
+        request: FastAPI request object used to read client IP.
+        db: Active database session dependency.
+
+    Returns:
+        Success message when logout completes.
+
+    RU: Отзывает refresh token и завершает сценарий выхода из системы.
+
+    Аргументы:
+        data: тело запроса с refresh token.
+        request: объект запроса FastAPI для чтения IP клиента.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Сообщение об успешном logout.
+    """
+
+    result = logout_user(
+        db=db,
+        refresh_token=data.refresh_token,
+        ip_address=request.client.host if request.client else None
+    )
+    if result:
+
+        return {"message": "Logout successful"} 
+    
+@router.post('/password-reset/request', response_model=MessageResponse)
+def password_reset_request_endpoint(
+    data: PasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """EN: Start the password reset flow for the provided email.
+
+    Args:
+        data: Request body with user email.
+        request: FastAPI request object used to read client metadata.
+        db: Active database session dependency.
+
+    Returns:
+        Service message describing the result.
+
+    RU: Запускает сценарий сброса пароля для указанного email.
+
+    Аргументы:
+        data: тело запроса с email пользователя.
+        request: объект запроса FastAPI для чтения клиентских метаданных.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Сообщение сервиса о результате операции.
+    """
+
+    result = request_password_reset(
+        db=db,
+        email=data.email,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent")
+    )
+
+    return {"message": result} 
+
+@router.post('/password-reset/confirm', response_model=MessageResponse)
+def password_reset_confirm_endpoint(
+    data: PasswordResetConfirmRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """EN: Confirm password reset using reset token and a new password.
+
+    Args:
+        data: Request body with reset token and new password.
+        request: FastAPI request object used to read client IP.
+        db: Active database session dependency.
+
+    Returns:
+        Service message after successful password change.
+
+    RU: Подтверждает сброс пароля по reset token и новому паролю.
+
+    Аргументы:
+        data: тело запроса с reset token и новым паролем.
+        request: объект запроса FastAPI для чтения IP клиента.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Сообщение сервиса после успешной смены пароля.
+    """
+
+    result = confirm_password_reset(
+        db=db,
+        reset_token=data.reset_token,
+        password=data.password,
+        ip_address=request.client.host if request.client else None,
+    )
+
+    return {"message": result} 
+
+@router.get('/me', response_model=MeResponse)
+def get_me_endpoint(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """EN: Return the current authenticated user from the bearer token.
+
+    Args:
+        request: FastAPI request object containing the Authorization header.
+        db: Active database session dependency.
+
+    Returns:
+        Current authenticated user data.
+
+    Raises:
+        HTTPException: If the Authorization header is missing or malformed.
+
+    RU: Возвращает текущего аутентифицированного пользователя по bearer token.
+
+    Аргументы:
+        request: объект запроса FastAPI с заголовком Authorization.
+        db: активная сессия базы данных из dependency.
+
+    Возвращает:
+        Данные текущего аутентифицированного пользователя.
+
+    Исключения:
+        HTTPException: Если заголовок Authorization отсутствует или имеет неверный формат.
+    """
+
+    
+    auth_header = request.headers.get("authorization")
+
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header is missing")
+
+    parts = auth_header.split()
+
+    if len(parts) != 2:
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+
+    scheme, token = parts
+
+    if scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid authentication scheme")
+
+    result = get_current_user(
+        db=db,
+        token=token,
+        ip_address=request.client.host if request.client else None,
+    )
+    return result
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/repositories/user_repository.py
+
+from sqlalchemy.orm import Session
+
+from app.models.user import User, UserRole
+
+
+class UserRepository:
+    """EN: Repository responsible for reading and writing ``users`` table data.
+
+    The main idea is simple: SQLAlchemy query details live here,
+    while business decisions should stay in services.
+
+    RU: Репозиторий, который отвечает за чтение и запись данных таблицы ``users``.
+
+    Основная идея простая: детали SQLAlchemy-запросов живут здесь,
+    а бизнес-решения должны оставаться в сервисном слое.
+    """
+
+    def __init__(self, db: Session):
+        """EN: Accept the active SQLAlchemy session for this repository.
+
+        Every method will use the same session object passed from outside.
+
+        Args:
+            db: Active SQLAlchemy session shared by repository methods.
+
+        RU: Принимает активную SQLAlchemy-сессию для этого репозитория.
+
+        Каждый метод дальше будет работать через один и тот же объект Session,
+        который передан снаружи.
+
+        Аргументы:
+            db: активная SQLAlchemy-сессия, общая для методов репозитория.
+        """
+
+        self.db = db
+
+    def get_user_by_email(self, email: str) -> User | None:
+        """EN: Find a user by email and return ``User`` or ``None``.
+
+        This is a common lookup for authentication flows,
+        because email usually acts as a unique identifier.
+
+        Args:
+            email: Email value used to search in the ``users`` table.
+
+        Returns:
+            Matching ``User`` object or ``None``.
+
+        RU: Ищет пользователя по email и возвращает ``User`` или ``None``.
+
+        Это типичный запрос для сценариев аутентификации,
+        потому что email обычно выступает уникальным идентификатором.
+
+        Аргументы:
+            email: значение email, по которому ищется запись в таблице ``users``.
+
+        Возвращает:
+            Найденный объект ``User`` или ``None``.
+        """
+
+        return self.db.query(User).filter(User.email == email).first()
+    
+
+    def get_user_by_id(self, id: int) -> User | None:
+        """EN: Return a user by primary key or ``None`` if it does not exist.
+
+        Args:
+            id: User identifier from the ``users`` table.
+
+        Returns:
+            Matching ``User`` object or ``None``.
+
+        RU: Возвращает пользователя по первичному ключу или ``None``, если записи нет.
+
+        Аргументы:
+            id: идентификатор пользователя из таблицы ``users``.
+
+        Возвращает:
+            Найденный объект ``User`` или ``None``.
+        """
+
+        return self.db.query(User).filter(User.id == id).first()
+
+
+    def create_user(
+        self,
+        email: str,
+        password_hash: str,
+        role: UserRole,
+        family_id: int,
+    ) -> User:
+        """EN: Create a new user instance and add it to the current session.
+
+    The method prepares a ``User`` instance and adds it to the session.
+    The transaction is NOT committed here — this must be handled at the service layer.
+
+    Args:
+        email: User email.
+        password_hash: Already prepared password hash, not a raw password.
+        role: Role value from ``UserRole`` enum.
+        family_id: Identifier of the family this user belongs to.
+
+    Returns:
+        New ``User`` ORM object added to the session (not yet committed).
+
+    RU: Создаёт нового пользователя и добавляет его в текущую сессию.
+
+        Метод создаёт экземпляр ``User`` и добавляет его в сессию.
+        Фиксация транзакции (commit) здесь НЕ выполняется — это ответственность сервисного слоя.
+
+    Аргументы:
+        email: email пользователя.
+        password_hash: уже подготовленный хеш пароля, а не сырой пароль.
+        role: значение роли из enum ``UserRole``.
+        family_id: идентификатор семьи, к которой относится пользователь.
+
+    Возвращает:
+        Новый ORM-объект ``User``, добавленный в сессию (ещё не сохранён в БД).
+    """
+        
+
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            role=role,
+            is_active=True,
+            family_id=family_id,
+        )
+
+        self.db.add(user)
+        return user
+
+    def update_user_password(self, user_id: int, password_hash: str) -> User | None:
+        """EN: Update the password hash for an existing user.
+
+        Args:
+            user_id: Identifier of the user whose password should be changed.
+            password_hash: New prepared password hash.
+
+        Returns:
+            Updated ``User`` object or ``None`` if the user does not exist.
+
+        RU: Обновляет хеш пароля существующего пользователя.
+
+        Аргументы:
+            user_id: идентификатор пользователя, чей пароль нужно изменить.
+            password_hash: новый подготовленный хеш пароля.
+
+        Возвращает:
+            Обновлённый объект ``User`` или ``None``, если пользователь не найден.
+        """
+
+        user = self.get_user_by_id(user_id)
+
+        if not user:
+            return None
+    
+        user.password_hash = password_hash
+        
+        return user
+    
+    def set_user_active_status(self, user_id: int, status: bool) -> User | None:
+        """EN: Change the active status flag for a user.
+
+        Args:
+            user_id: Identifier of the user to update.
+            status: New boolean value for ``is_active``.
+
+        Returns:
+            Updated ``User`` object or ``None`` if the user does not exist.
+
+        RU: Меняет признак активности пользователя.
+
+        Аргументы:
+            user_id: идентификатор пользователя для обновления.
+            status: новое булево значение для поля ``is_active``.
+
+        Возвращает:
+            Обновлённый объект ``User`` или ``None``, если пользователь не найден.
+        """
+
+        user = self.get_user_by_id(user_id)
+
+        if not user:
+            return None
+        
+        user.is_active = status
+        return user
+
+
+
+
+
+# END FILE CONTENTS
+
+
+# File: Папка обучения/fast_api3.md
+
+# Как FastAPI понимает, что именно прислал клиент и куда это положить
+
+Разберём по порядку:
+
+- что отправляет клиент
+- что приходит в endpoint
+- как FastAPI понимает, откуда брать `book_id`
+- как он понимает, что `book_data` надо брать из body
+
+Будем опираться на этот пример:
+
+```py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+
+
+app = FastAPI()
+
+
+class BookCreateRequest(BaseModel):
+    title: str
+    author: str
+    year: int
+
+
+class BookResponse(BaseModel):
+    id: int
+    title: str
+    author: str
+    year: int
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+books_db = [
+    {"id": 1, "title": "1984", "author": "George Orwell", "year": 1949},
+    {"id": 2, "title": "Brave New World", "author": "Aldous Huxley", "year": 1932},
+]
+
+
+@app.get("/books", response_model=List[BookResponse])
+def get_all_books():
+    return books_db
+
+
+@app.get("/books/{book_id}", response_model=BookResponse)
+def get_book_by_id(book_id: int):
+    for book in books_db:
+        if book["id"] == book_id:
+            return book
+
+    raise HTTPException(status_code=404, detail="Книга не найдена")
+
+
+@app.post("/books", response_model=BookResponse)
+def create_book(book_data: BookCreateRequest):
+    new_id = max(book["id"] for book in books_db) + 1 if books_db else 1
+
+    new_book = {
+        "id": new_id,
+        "title": book_data.title,
+        "author": book_data.author,
+        "year": book_data.year,
+    }
+
+    books_db.append(new_book)
+    return new_book
+
+
+@app.delete("/books/{book_id}", response_model=MessageResponse)
+def delete_book(book_id: int):
+    for index, book in enumerate(books_db):
+        if book["id"] == book_id:
+            books_db.pop(index)
+            return {"message": "Книга успешно удалена"}
+
+    raise HTTPException(status_code=404, detail="Книга не найдена")
+```
+
+1. Что именно отправляет клиент
+
+Клиент отправляет HTTP-запрос.
+
+У любого HTTP-запроса есть несколько частей:
+ • метод
+ • путь
+ • заголовки
+ • иногда query-параметры
+ • иногда тело запроса
+
+Разберём это на примерах.
+
+Пример 1. Получить все книги
+
+Клиент отправляет:
+
+GET /books HTTP/1.1
+Host: 127.0.0.1:8000
+
+Что здесь важно:
+ • GET — метод
+ • /books — путь
+ • тела запроса нет
+
+То есть клиент просто говорит:
+
+дай мне все книги
+
+⸻
+
+Пример 2. Получить одну книгу по ID
+
+Клиент отправляет:
+
+GET /books/2 HTTP/1.1
+Host: 127.0.0.1:8000
+
+Что здесь важно:
+ • GET — метод
+ • /books/2 — путь
+ • внутри пути уже зашит идентификатор книги
+
+То есть клиент говорит:
+
+дай мне книгу с ID = 2
+
+⸻
+
+Пример 3. Создать книгу
+
+Клиент отправляет:
+
+POST /books HTTP/1.1
+Host: 127.0.0.1:8000
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+Что здесь важно:
+ • POST — метод
+ • /books — путь
+ • в теле запроса лежит JSON
+
+То есть клиент говорит:
+
+создай новую книгу
+вот её данные
+
+⸻
+
+Пример 4. Удалить книгу
+
+Клиент отправляет:
+
+DELETE /books/2 HTTP/1.1
+Host: 127.0.0.1:8000
+
+Это означает:
+
+удали книгу с ID = 2
+
+⸻
+
+1. Что именно приходит в endpoint
+
+Теперь важный момент: что FastAPI передаёт в твою Python-функцию.
+
+Вот endpoint:
+
+@app.get("/books/{book_id}", response_model=BookResponse)
+def get_book_by_id(book_id: int):
+
+Если клиент вызвал:
+
+GET /books/2 HTTP/1.1
+Host: 127.0.0.1:8000
+
+то FastAPI передаст в функцию:
+
+book_id = 2
+
+То есть endpoint получает уже готовое значение.
+
+⸻
+
+Другой пример:
+
+@app.post("/books", response_model=BookResponse)
+def create_book(book_data: BookCreateRequest):
+
+Если клиент отправил:
+
+POST /books HTTP/1.1
+Host: 127.0.0.1:8000
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+то FastAPI создаст объект BookCreateRequest и передаст его в функцию как book_data.
+
+То есть внутри endpoint ты уже получаешь не “сырой JSON”, а нормальный Python-объект.
+
+⸻
+
+1. Как FastAPI понимает, что book_id надо брать из URL
+
+Разберём этот код:
+
+@app.get("/books/{book_id}", response_model=BookResponse)
+def get_book_by_id(book_id: int):
+
+Вот здесь происходит очень важная связка:
+
+Шаг 1. FastAPI смотрит на путь
+
+"/books/{book_id}"
+
+Фигурные скобки означают:
+
+это переменная часть URL
+
+То есть FastAPI понимает:
+
+вместо {book_id} придёт какое-то конкретное значение
+
+Например:
+ • /books/1
+ • /books/2
+ • /books/500
+
+⸻
+
+Шаг 2. FastAPI смотрит на имя параметра функции
+
+def get_book_by_id(book_id: int):
+
+Имя параметра функции:
+
+book_id
+
+совпадает с именем в пути:
+
+{book_id}
+
+⸻
+
+Шаг 3. FastAPI связывает их
+
+То есть FastAPI рассуждает так:
+
+в URL есть переменная {book_id}
+в функции есть аргумент book_id
+значит значение из URL нужно передать в этот аргумент
+
+⸻
+
+Шаг 4. FastAPI приводит тип
+
+Ты написал:
+
+book_id: int
+
+значит FastAPI пытается привести значение к числу.
+
+Если клиент отправил:
+
+GET /books/2 HTTP/1.1
+
+то FastAPI сделает:
+
+book_id = 2
+
+Если клиент отправил:
+
+GET /books/abc HTTP/1.1
+
+то FastAPI не сможет превратить abc в int и вернёт ошибку.
+
+⸻
+
+Важный вывод
+
+FastAPI понимает, что book_id надо брать из URL, потому что:
+ 1. в маршруте есть {book_id}
+ 2. в функции есть аргумент book_id
+ 3. имя совпадает
+
+⸻
+
+1. Как FastAPI понимает, что book_data надо брать из body
+
+Теперь другой endpoint:
+
+@app.post("/books", response_model=BookResponse)
+def create_book(book_data: BookCreateRequest):
+
+Здесь уже другой механизм.
+
+⸻
+
+Что видит FastAPI
+
+FastAPI видит, что у функции есть аргумент:
+
+book_data: BookCreateRequest
+
+И тип этого аргумента — Pydantic-модель, то есть класс, унаследованный от BaseModel.
+
+class BookCreateRequest(BaseModel):
+    title: str
+    author: str
+    year: int
+
+⸻
+
+Что FastAPI из этого понимает
+
+Он рассуждает так:
+
+если аргумент — это Pydantic-модель,
+значит данные для него нужно брать из тела запроса
+
+⸻
+
+Как это выглядит на практике
+
+Клиент отправляет:
+
+POST /books HTTP/1.1
+Host: 127.0.0.1:8000
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+FastAPI:
+ 1. читает JSON из body
+ 2. проверяет, что там есть:
+ • title
+ • author
+ • year
+ 3. проверяет типы:
+ • title — строка
+ • author — строка
+ • year — число
+ 4. создаёт объект BookCreateRequest
+ 5. передаёт его в endpoint
+
+⸻
+
+Что endpoint получает внутри
+
+Внутри функции ты работаешь уже так:
+
+book_data.title
+book_data.author
+book_data.year
+
+А не руками достаёшь поля из словаря.
+
+⸻
+
+Важный вывод
+
+FastAPI понимает, что book_data надо брать из body, потому что:
+ • это аргумент функции
+ • его тип — Pydantic-модель (BookCreateRequest)
+
+⸻
+
+1. Разница между path parameter и body на одном примере
+
+Сравним два endpoint.
+
+Пример path parameter
+
+@app.get("/books/{book_id}")
+def get_book_by_id(book_id: int):
+
+Откуда берётся book_id
+
+Из URL:
+
+GET /books/2 HTTP/1.1
+
+⸻
+
+Пример body
+
+@app.post("/books")
+def create_book(book_data: BookCreateRequest):
+
+Откуда берётся book_data
+
+Из тела запроса:
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+⸻
+
+1. Что будет, если клиент пришлёт неправильные данные в body
+
+Например, клиент отправил:
+
+POST /books HTTP/1.1
+Host: 127.0.0.1:8000
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert"
+}
+
+То есть забыл year.
+
+FastAPI увидит, что схема требует:
+
+class BookCreateRequest(BaseModel):
+    title: str
+    author: str
+    year: int
+
+И поймёт:
+
+поле year обязательно, а его нет
+
+В этом случае endpoint вообще не будет вызван.
+FastAPI сам вернёт клиенту ошибку валидации.
+
+⸻
+
+Это очень важный момент
+
+FastAPI может не пустить мусор в твою функцию.
+
+То есть функция create_book(...) начинает работать только тогда, когда данные уже прошли базовую проверку структуры.
+
+⸻
+
+1. Что будет, если book_id неправильный
+
+Например, клиент отправил:
+
+GET /books/abc HTTP/1.1
+Host: 127.0.0.1:8000
+
+А у тебя:
+
+def get_book_by_id(book_id: int):
+
+FastAPI попытается сделать:
+
+book_id = int("abc")
+
+Это невозможно.
+
+И снова endpoint не будет вызван — FastAPI вернёт ошибку.
+
+⸻
+
+1. Как FastAPI отличает body от обычных простых параметров
+
+Это важный практический момент.
+
+Правило очень простое
+
+Если параметр — Pydantic-модель
+
+FastAPI считает, что это body.
+
+Пример:
+
+book_data: BookCreateRequest
+
+⸻
+
+Если параметр совпадает с {...} в пути
+
+FastAPI считает, что это path parameter.
+
+Пример:
+
+@app.get("/books/{book_id}")
+def get_book_by_id(book_id: int):
+
+⸻
+
+Если параметр простой и не в пути
+
+Обычно FastAPI будет считать его query-параметром.
+
+Пример:
+
+@app.get("/books")
+def search_books(year: int):
+
+Тогда клиент должен вызвать:
+
+GET /books?year=2020 HTTP/1.1
+
+⸻
+
+1. Небольшой дополнительный пример с query parameter
+
+@app.get("/books/search")
+def search_books(year: int):
+    return {"year": year}
+
+Если клиент отправит:
+
+GET /books/search?year=2020 HTTP/1.1
+Host: 127.0.0.1:8000
+
+то FastAPI передаст в функцию:
+
+year = 2020
+
+⸻
+
+Что важно понять
+
+FastAPI смотрит на контекст параметра:
+ • есть ли он в пути?
+ • является ли он Pydantic-схемой?
+ • является ли он обычным простым параметром?
+
+И по этому решает, откуда его брать.
+
+⸻
+
+1. Визуальная схема: как FastAPI распределяет параметры
+
+Путь
+
+@app.get("/books/{book_id}")
+def get_book_by_id(book_id: int):
+
+Берётся из URL:
+
+/books/2 → book_id = 2
+
+⸻
+
+Тело
+
+@app.post("/books")
+def create_book(book_data: BookCreateRequest):
+
+Берётся из body:
+
+{
+  "title": "Dune",
+  "author": "Frank Herbert",
+  "year": 1965
+}
+
+⸻
+
+Query
+
+@app.get("/books/search")
+def search_books(year: int):
+
+Берётся из query string:
+
+/books/search?year=2020
+
+⸻
+
+1. Что здесь важно запомнить
+
+FastAPI не читает твои мысли
+
+Он ориентируется на вполне конкретные признаки:
+
+Path
+
+Совпадение имени параметра с {...} в URL.
+
+Body
+
+Параметр типа BaseModel.
+
+Query
+
+Обычные параметры, не найденные в path и не являющиеся body-моделью.
+
+⸻
+
+1. Самая короткая выжимка
+
+- Если параметр указан в пути как `{book_id}`, FastAPI берёт его из URL.
+- Если параметр имеет тип Pydantic-модели, FastAPI берёт его из body.
+- Если параметр простой (`int`, `str`, `bool`) и не указан в пути, FastAPI обычно берёт его из query.
+
+⸻
+
+1. Мини-таблица для запоминания
+
+Что в функции Откуда FastAPI возьмёт
+book_id: int и путь "/books/{book_id}" из URL path
+book_data: BookCreateRequest из body
+year: int при пути "/books/search" из query
+
+⸻
+
+1. Что логично разобрать следующим шагом
+
+Теперь следующий правильный шаг — объяснить так же подробно:
+ • что такое response_model
+ • зачем он нужен
+ • почему FastAPI не просто возвращает “что угодно”
+ • как он фильтрует и приводит ответ
+
+Это следующий кирпичик после понимания входных параметров.
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/schemas/user.py
+
+from pydantic import BaseModel, ConfigDict
+from app.models.user import UserRole
+
+
+
+
+
+class UserResponse (BaseModel):
+    """EN: Response schema for a user returned by auth endpoints.
+
+    RU: Схема ответа с пользователем, которую возвращают auth endpoint.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+    role: UserRole
+    is_active: bool
+    family_id: int
+
+
+
+class MeResponse(BaseModel):
+    """EN: Response schema for the current authenticated user.
+
+    RU: Схема ответа для текущего аутентифицированного пользователя.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+    role: UserRole
+    is_active: bool
+    family_id: int # на данном этапе по совету ИИ оставляю пока так как есть, при разростании проекта буду добавлять 
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/security.py
+
+from pwdlib import PasswordHash
+from datetime import datetime, timedelta, timezone
+import jwt
+import secrets
+import string
+import hashlib
+from typing import Any
+
+from app.core.config import SECRET_KEY, ACCESS_TOKEN_EXPIRE_MINUTES
+
+pass_hash = PasswordHash.recommended()
+
+def validation_password(password: str) -> str:
+    """EN: Validate a raw password against the current password policy.
+
+    The function trims outer whitespace and checks basic strength rules:
+    minimum length, at least one special symbol, one uppercase letter,
+    and one digit.
+
+    Args:
+        password: Raw password entered by the user.
+
+    Returns:
+        Normalized password string after validation.
+
+    Raises:
+        ValueError: If the password does not satisfy the policy.
+
+    RU: Проверяет сырой пароль на соответствие текущей парольной политике.
+
+    Функция убирает внешние пробелы и проверяет базовые правила сложности:
+    минимальную длину, наличие спецсимвола, одной заглавной буквы
+    и одной цифры.
+
+    Аргументы:
+        password: пароль, который ввёл пользователь.
+
+    Возвращает:
+        Нормализованную строку пароля после успешной проверки.
+
+    Исключения:
+        ValueError: Если пароль не проходит проверку по правилам.
+    """
+
+
+    password = password.strip()
+
+    if len(password) < 8:
+        raise ValueError("Пароль слишком короткий")
+
+    if not any(x in password for x in "@`~!?$#*&^()"):
+        raise ValueError("Пароль должен содержать спецсимвол")
+
+    if not any(char.isupper() for char in password):
+        raise ValueError("Пароль должен содержать хотя бы одну заглавную букву")
+
+    if not any(char.isdigit() for char in password):
+        raise ValueError("Пароль должен содержать цифры")
+
+    return password
+
+def get_password_hash(password: str) -> str:
+    """EN: Validate a password and return its secure hash representation.
+
+    Args:
+        password: Raw password string before hashing.
+
+    Returns:
+        Password hash generated by ``pwdlib``.
+
+    RU: Проверяет пароль и возвращает его безопасный хеш.
+
+    Аргументы:
+        password: сырой пароль до хеширования.
+
+    Возвращает:
+        Хеш пароля, созданный через ``pwdlib``.
+    """
+
+    
+    password = validation_password(password)
+    return pass_hash.hash(password)
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """EN: Compare a raw password with a stored password hash.
+
+    Args:
+        password: Raw password provided for verification.
+        password_hash: Stored hash from the database.
+
+    Returns:
+        ``True`` if the password matches the hash, otherwise ``False``.
+
+    RU: Сравнивает сырой пароль с сохранённым хешем пароля.
+
+    Аргументы:
+        password: пароль, который пришёл на проверку.
+        password_hash: хеш пароля, сохранённый в базе данных.
+
+    Возвращает:
+        ``True``, если пароль совпадает с хешем, иначе ``False``.
+    """
+    try:
+        return pass_hash.verify(password, password_hash)
+    except Exception:
+        
+        return False
+
+
+def create_access_token(user_id: int, role: Any) -> str:
+    """EN: Create a short-lived JWT access token for the authenticated user.
+
+    Args:
+        user_id: Identifier of the authenticated user.
+        role: User role object whose value is written into the JWT payload.
+
+    Returns:
+        Encoded JWT access token string.
+
+    RU: Создаёт короткоживущий JWT access token для аутентифицированного пользователя.
+
+    Аргументы:
+        user_id: идентификатор аутентифицированного пользователя.
+        role: объект роли пользователя, значение которого попадёт в payload JWT.
+
+    Возвращает:
+        Закодированную строку JWT access token.
+    """
+
+  
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "sub": str(user_id),        # стандарт JWT
+        "user_id": user_id,
+        "role": role.value,
+        "iat": now,                # когда выдан
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+
+def create_refresh_token():
+    """EN: Generate a random refresh token string.
+
+    Returns:
+        Random token composed of latin letters and digits.
+
+    RU: Генерирует случайную строку refresh token.
+
+    Возвращает:
+        Случайный токен, составленный из латинских букв и цифр.
+    """
+
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(40))
+
+
+def create_reset_token() -> str:
+    """EN: Generate a one-time password reset token string.
+
+    The current implementation intentionally reuses the same random generation
+    strategy as refresh tokens, but keeps a separate function so reset-token
+    logic can evolve independently later.
+
+    Returns:
+        Random reset token string.
+
+    RU: Генерирует одноразовый токен для сброса пароля.
+
+    Текущая реализация специально использует тот же способ генерации случайной строки,
+    что и refresh token, но вынесена в отдельную функцию, чтобы дальше логику
+    reset token можно было развивать независимо.
+
+    Возвращает:
+        Случайную строку reset token.
+    """
+
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(40))
+
+
+def hash_token(token: str) -> str:
+    """EN: Return the SHA-256 hash of a token string.
+
+    Args:
+        token: Raw token value that should not be stored directly.
+
+    Returns:
+        Hexadecimal SHA-256 digest.
+
+    RU: Возвращает SHA-256 хеш для строки токена.
+
+    Аргументы:
+        token: сырой токен, который не нужно хранить в базе напрямую.
+
+    Возвращает:
+        Шестнадцатеричное представление SHA-256 хеша.
+    """
+
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def decode_access_token(token: str) -> dict[str, Any]:
+    """EN: Decode and validate a JWT access token.
+
+    Args:
+        token: Encoded JWT access token string.
+
+    Returns:
+        Decoded payload dictionary.
+
+    Raises:
+        ValueError: If the token is expired, invalid, or has an unexpected payload.
+
+    RU: Декодирует и валидирует JWT access token.
+
+    Аргументы:
+        token: закодированная строка JWT access token.
+
+    Возвращает:
+        Словарь с декодированным payload.
+
+    Исключения:
+        ValueError: Если токен истёк, повреждён или содержит некорректный payload.
+    """
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        # токен истёк
+        raise ValueError("Токен истёк")
+    except jwt.InvalidTokenError:
+        # любая другая ошибка JWT (подделка, мусор и т.д.)
+        raise ValueError("Неверный токен")
+
+    # дополнительная проверка содержимого
+    if "user_id" not in payload or "role" not in payload:
+        raise ValueError("Некорректный payload")
+
+    return payload
+    
+    
+     
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/core/errors.py
+
+class AuthError(Exception):
+    """
+    EN: Base authentication error.
+
+    This class is used as a parent for all auth-related exceptions.
+    It contains a unified structure:
+    - message (human readable)
+    - event_type (for audit logs)
+
+    RU: Базовая ошибка аутентификации.
+
+    Используется как родитель для всех ошибок, связанных с авторизацией.
+    Содержит:
+    - message (человекочитаемое сообщение)
+    - event_type (для audit логов)
+    """
+
+    def __init__(self, message: str, event_type: str):
+        """EN: Initialize a structured authentication error.
+
+        Args:
+            message: Human-readable error message.
+            event_type: Audit-friendly event type string.
+
+        RU: Инициализирует структурированную ошибку аутентификации.
+
+        Аргументы:
+            message: человекочитаемое сообщение об ошибке.
+            event_type: строка типа события для аудита.
+        """
+
+        self.message = message
+        self.event_type = event_type
+        super().__init__(message)
+
+
+# ===== TOKEN ERRORS =====
+
+class RefreshTokenNotFound(AuthError):
+    """EN: Error raised when a refresh token record cannot be found.
+
+    RU: Ошибка, которая выбрасывается, когда запись refresh token не найдена.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a missing refresh token.
+
+        RU: Создаёт ошибку для отсутствующего refresh token.
+        """
+
+        super().__init__(
+            message="Токен не существует",
+            event_type="refresh_token_not_found"
+        )
+
+
+class RefreshTokenRevoked(AuthError):
+    """EN: Error raised when a refresh token was already revoked.
+
+    RU: Ошибка, которая выбрасывается, когда refresh token уже был отозван.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for an already revoked refresh token.
+
+        RU: Создаёт ошибку для уже отозванного refresh token.
+        """
+
+        super().__init__(
+            message="Токен уже отозван",
+            event_type="refresh_token_revoked"
+        )
+
+
+class RefreshTokenExpired(AuthError):
+    """EN: Error raised when a refresh token is already expired.
+
+    RU: Ошибка, которая выбрасывается, когда срок действия refresh token уже истёк.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for an expired refresh token.
+
+        RU: Создаёт ошибку для просроченного refresh token.
+        """
+
+        super().__init__(
+            message="Токен истёк",
+            event_type="refresh_token_expired"
+        )
+
+
+class RefreshTokenNoExpiry(AuthError):
+    """EN: Error raised when a refresh token has no expiration timestamp.
+
+    RU: Ошибка, которая выбрасывается, когда у refresh token нет срока действия.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a refresh token without expiry information.
+
+        RU: Создаёт ошибку для refresh token без информации о сроке действия.
+        """
+
+        super().__init__(
+            message="Срок действия токена не определён",
+            event_type="refresh_token_no_expiry"
+        )
+
+
+# ===== USER ERRORS =====
+
+class RefreshUserNotFound(AuthError):
+    """EN: Error raised when refresh flow points to a missing user.
+
+    RU: Ошибка, которая выбрасывается, когда refresh-сценарий ссылается на отсутствующего пользователя.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a missing user during refresh flow.
+
+        RU: Создаёт ошибку для отсутствующего пользователя в refresh-сценарии.
+        """
+
+        super().__init__(
+            message="Пользователь не существует",
+            event_type="refresh_user_not_found"
+        )
+
+
+class RefreshUserBlocked(AuthError):
+    """EN: Error raised when refresh flow points to a blocked user.
+
+    RU: Ошибка, которая выбрасывается, когда refresh-сценарий ссылается на заблокированного пользователя.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a blocked user during refresh flow.
+
+        RU: Создаёт ошибку для заблокированного пользователя в refresh-сценарии.
+        """
+
+        super().__init__(
+            message="Пользователь не активен",
+            event_type="refresh_user_blocked"
+        )
+
+class AccessUserNotFound(AuthError):
+    """EN: Error raised when access-token flow cannot find the user.
+
+    RU: Ошибка, которая выбрасывается, когда в access-сценарии не найден пользователь.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a missing user during access-token flow.
+
+        RU: Создаёт ошибку для отсутствующего пользователя в access-сценарии.
+        """
+
+        super().__init__(
+            message="Пользователь не существует",
+            event_type="access_user_not_found"
+        )
+
+
+class AccessUserBlocked(AuthError):
+    """EN: Error raised when access-token flow resolves to a blocked user.
+
+    RU: Ошибка, которая выбрасывается, когда access-сценарий приводит к заблокированному пользователю.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a blocked user during access-token flow.
+
+        RU: Создаёт ошибку для заблокированного пользователя в access-сценарии.
+        """
+
+        super().__init__(
+            message="Пользователь не активен",
+            event_type="access_user_blocked"
+        )
+
+
+# ====== ACCESS ERRORS ========
+
+class AccessTokenNotFound(AuthError):
+    """EN: Error raised when an access token is missing or cannot be used.
+
+    RU: Ошибка, которая выбрасывается, когда access token отсутствует или непригоден к использованию.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a missing or invalid access token.
+
+        RU: Создаёт ошибку для отсутствующего или невалидного access token.
+        """
+
+        super().__init__(
+            message="Токен не существует",
+            event_type="access_refresh_token_not_found"
+        )
+
+
+
+# ====== RESET TOKEN ERRORS ==========
+
+class ResetTokenNotFound(AuthError):
+    """EN: Error raised when a password reset token cannot be found.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля не найден.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a missing password reset token.
+
+        RU: Создаёт ошибку для отсутствующего reset token.
+        """
+
+        super().__init__(
+            message="Токен не существует",
+            event_type="reset_token_not_found"
+        )
+
+class ResetTokenUsed(AuthError):
+    """EN: Error raised when a password reset token was already used.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля уже был использован.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for an already used password reset token.
+
+        RU: Создаёт ошибку для уже использованного reset token.
+        """
+
+        super().__init__(
+            message="Токен был использован",
+            event_type="reset_token_was_used"
+        )
+
+class ResetTokenNoExpiry(AuthError):
+    """EN: Error raised when a reset token has no expiration timestamp.
+
+    RU: Ошибка, которая выбрасывается, когда у reset token нет срока действия.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for a reset token without expiry information.
+
+        RU: Создаёт ошибку для reset token без информации о сроке действия.
+        """
+
+        super().__init__(
+            message="Срок действия токена не определён",
+            event_type="reset_token_no_expiry"
+        )
+
+class ResetTokenExpired(AuthError):
+    """EN: Error raised when a password reset token is expired.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля просрочен.
+    """
+
+    def __init__(self) -> None:
+        """EN: Create an error for an expired password reset token.
+
+        RU: Создаёт ошибку для просроченного reset token.
+        """
+
+        super().__init__(
+            message="Токен истёк",
+            event_type="reset_token_expired"
+        )
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/user.py
+
+from datetime import datetime
+import enum
+
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class UserRole(enum.Enum):
+    """EN: Enumeration of user roles inside one family space.
+
+    Using an enum makes the allowed role values explicit and easier to control.
+
+    RU: Перечисление ролей пользователя внутри одной семейной группы.
+
+    Использование enum делает допустимые значения роли явными
+    и помогает лучше контролировать их в коде и схеме БД.
+    """
+
+    admin = "admin"
+    user = "user"
+
+
+class User(Base):
+    """EN: ORM model for the ``users`` table.
+
+    The class stores the core identity data for a user:
+    email, password hash, role, activity flag, and relation to a family.
+
+    RU: ORM-модель таблицы ``users``.
+
+    Этот класс хранит базовые данные пользователя:
+    email, хеш пароля, роль, признак активности и связь с семьёй.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    family_id: Mapped[int] = mapped_column(
+        BigInteger,
+       
+        ForeignKey("families.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+    
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+# END FILE CONTENTS
+
+
+# File: backend/requirements.txt
+
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+PyJWT
+python-dotenv
+pwdlib[argon2]
+pydantic
+
+
+# END FILE CONTENTS
+
+
+# File: backend/app/models/audit_log.py
+
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, func
+from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+class AuditLog(Base):
+    """EN: ORM model for the ``audit_logs`` table.
+
+    Audit logs are useful because they preserve a history of security-related
+    actions even when the main business objects later change or disappear.
+
+    RU: ORM-модель таблицы ``audit_logs``.
+
+    Журнал аудита полезен тем, что сохраняет историю событий безопасности,
+    даже если основные бизнес-объекты позже изменятся или будут удалены.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        
+        # если пользователь исчезнет, след аудита всё равно должен выжить.
+        # Поэтому запись журнала остаётся, а прямой идентификатор просто станет NULL.
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+
+    ip_address: Mapped[str | None] = mapped_column(INET)
+
+    user_agent: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # ``details`` - это место, где журнал может хранить дополнительный контекст,
+    # не заставляя создавать отдельную SQL-колонку под каждую мелочь.
+   
+    details: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+
+# END FILE CONTENTS

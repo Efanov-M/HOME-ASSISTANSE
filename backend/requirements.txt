@@ -1,2 +1,8 @@
-pip install 'pwdlib[bcrypt]'
-pip install 'pwdlib[argon2]'
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+PyJWT
+python-dotenv
+pwdlib[argon2]
+pydantic
