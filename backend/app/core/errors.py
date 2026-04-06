@@ -37,6 +37,11 @@ class AuthError(Exception):
 # ===== TOKEN ERRORS =====
 
 class RefreshTokenNotFound(AuthError):
+    """EN: Error raised when a refresh token record cannot be found.
+
+    RU: Ошибка, которая выбрасывается, когда запись refresh token не найдена.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a missing refresh token.
 
@@ -50,6 +55,11 @@ class RefreshTokenNotFound(AuthError):
 
 
 class RefreshTokenRevoked(AuthError):
+    """EN: Error raised when a refresh token was already revoked.
+
+    RU: Ошибка, которая выбрасывается, когда refresh token уже был отозван.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for an already revoked refresh token.
 
@@ -63,6 +73,11 @@ class RefreshTokenRevoked(AuthError):
 
 
 class RefreshTokenExpired(AuthError):
+    """EN: Error raised when a refresh token is already expired.
+
+    RU: Ошибка, которая выбрасывается, когда срок действия refresh token уже истёк.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for an expired refresh token.
 
@@ -76,6 +91,11 @@ class RefreshTokenExpired(AuthError):
 
 
 class RefreshTokenNoExpiry(AuthError):
+    """EN: Error raised when a refresh token has no expiration timestamp.
+
+    RU: Ошибка, которая выбрасывается, когда у refresh token нет срока действия.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a refresh token without expiry information.
 
@@ -91,6 +111,11 @@ class RefreshTokenNoExpiry(AuthError):
 # ===== USER ERRORS =====
 
 class RefreshUserNotFound(AuthError):
+    """EN: Error raised when refresh flow points to a missing user.
+
+    RU: Ошибка, которая выбрасывается, когда refresh-сценарий ссылается на отсутствующего пользователя.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a missing user during refresh flow.
 
@@ -104,6 +129,11 @@ class RefreshUserNotFound(AuthError):
 
 
 class RefreshUserBlocked(AuthError):
+    """EN: Error raised when refresh flow points to a blocked user.
+
+    RU: Ошибка, которая выбрасывается, когда refresh-сценарий ссылается на заблокированного пользователя.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a blocked user during refresh flow.
 
@@ -116,6 +146,11 @@ class RefreshUserBlocked(AuthError):
         )
 
 class AccessUserNotFound(AuthError):
+    """EN: Error raised when access-token flow cannot find the user.
+
+    RU: Ошибка, которая выбрасывается, когда в access-сценарии не найден пользователь.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a missing user during access-token flow.
 
@@ -129,6 +164,11 @@ class AccessUserNotFound(AuthError):
 
 
 class AccessUserBlocked(AuthError):
+    """EN: Error raised when access-token flow resolves to a blocked user.
+
+    RU: Ошибка, которая выбрасывается, когда access-сценарий приводит к заблокированному пользователю.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a blocked user during access-token flow.
 
@@ -144,6 +184,11 @@ class AccessUserBlocked(AuthError):
 # ====== ACCESS ERRORS ========
 
 class AccessTokenNotFound(AuthError):
+    """EN: Error raised when an access token is missing or cannot be used.
+
+    RU: Ошибка, которая выбрасывается, когда access token отсутствует или непригоден к использованию.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a missing or invalid access token.
 
@@ -160,6 +205,11 @@ class AccessTokenNotFound(AuthError):
 # ====== RESET TOKEN ERRORS ==========
 
 class ResetTokenNotFound(AuthError):
+    """EN: Error raised when a password reset token cannot be found.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля не найден.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a missing password reset token.
 
@@ -172,6 +222,11 @@ class ResetTokenNotFound(AuthError):
         )
 
 class ResetTokenUsed(AuthError):
+    """EN: Error raised when a password reset token was already used.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля уже был использован.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for an already used password reset token.
 
@@ -184,6 +239,11 @@ class ResetTokenUsed(AuthError):
         )
 
 class ResetTokenNoExpiry(AuthError):
+    """EN: Error raised when a reset token has no expiration timestamp.
+
+    RU: Ошибка, которая выбрасывается, когда у reset token нет срока действия.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for a reset token without expiry information.
 
@@ -196,6 +256,11 @@ class ResetTokenNoExpiry(AuthError):
         )
 
 class ResetTokenExpired(AuthError):
+    """EN: Error raised when a password reset token is expired.
+
+    RU: Ошибка, которая выбрасывается, когда токен сброса пароля просрочен.
+    """
+
     def __init__(self) -> None:
         """EN: Create an error for an expired password reset token.
 

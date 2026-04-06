@@ -5,12 +5,12 @@ from typing import Any, TypeVar, ParamSpec
 
 from sqlalchemy.orm import Session
 
-from config import RESET_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+from app.core.config import RESET_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
 from app.core.database import SessionLocal
 from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
-
+from app.models.family import Family
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.password_reset_repository import PasswordResetTokenRepository
 from app.repositories.family_repository import FamilyRepository
@@ -1019,3 +1019,4 @@ def confirm_password_reset(
             details = {}
         )
     return 'Пароль успешно обновлён'
+ 

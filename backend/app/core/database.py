@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from config import DATABASE_URL
+from app.core.config import DATABASE_URL
 
 
 # engine как "технический вход" в PostgreSQL:

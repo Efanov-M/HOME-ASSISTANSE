@@ -6,7 +6,7 @@ import string
 import hashlib
 from typing import Any
 
-from config import SECRET_KEY, ACCESS_TOKEN_EXPIRE_MINUTES
+from app.core.config import SECRET_KEY, ACCESS_TOKEN_EXPIRE_MINUTES
 
 pass_hash = PasswordHash.recommended()
 
