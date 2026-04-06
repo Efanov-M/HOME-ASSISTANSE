@@ -78,7 +78,12 @@ def transactional(func: Callable[P, R]) -> Callable[P, R]:
         RU: Выполняет обёрнутую сервисную функцию внутри одной транзакции.
         """
 
-        db: Session = args[0]
+        db: Session | None = kwargs.get("db")
+
+        if db is None:
+            if not args:
+                raise ValueError("Функция вызвана неверно: db не передан")
+            db = args[0]
         try:
             result = func(*args, **kwargs)
             db.commit()
@@ -609,6 +614,7 @@ def register_user(db: Session, email: str, password: str, family_name: str) -> U
     existing_family = family_repository.get_family_by_name(family_name)
     if existing_family is None:
         new_family = family_repository.create_family(family_name)
+        family_repository.db.flush()
         family_id = new_family.id
         role = UserRole.admin
     else:
