@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tasks Home Secretary</title>
+</head>
+
+<body>
+    <header>
+        <h1>Tasks</h1>
+    </header>
+
+    <main>
+        <section>
+            <p>
+                This page shows the task list in Home Secretary. Here you can review current tasks,
+                check their status, and open a task for more details.
+            </p>
+            <p>
+                Эта страница показывает список задач в Home Secretary. Здесь можно просматривать текущие задачи,
+                проверять их статус и открывать задачу для более подробного просмотра.
+            </p>
+        </section>
+
+        <section>
+            <a href="task-create.html">Create task</a>
+        </section>
+
+        <section>
+            <h2>Filter</h2>
+            <p>Select a simple task filter:</p>
+
+            <form>
+                <label for="task-status">Status</label>
+                <select id="task-status" name="task-status">
+                    <option value="all">All</option>
+                    <option value="open">Open</option>
+                    <option value="in-progress">In progress</option>
+                    <option value="done">Done</option>
+                </select>
+
+                <label for="task-type">Task type</label>
+                <select id="task-type" name="task-type">
+                    <option value="all">All</option>
+                    <option value="personal">Personal</option>
+                    <option value="family">Family</option>
+                </select>
+
+                <button type="submit">Apply filter</button>
+            </form>
+        </section>
+
+
+        <section>
+            <a href="dashboard.html">Back to dashboard</a>
+        </section>
+    </main>
+
+    <footer>
+        <p>Home Secretary frontend skeleton</p>
+    </footer>
+</body>
+
+</html>

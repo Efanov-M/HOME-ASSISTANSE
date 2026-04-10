@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create task Home Secretary</title>
+</head>
+
+
+<body>
+    <header>
+        <h1>Create task</h1>
+    </header>
+    <main>
+        <section>
+            <p>Use this form to create a new task in Home Secretary. Fill in the main task details and save it to add
+                the task to your workspace.</p>
+            <p>Используйте эту форму, чтобы создать новую задачу в Home Secretary. Заполните основные данные задачи и
+                сохраните её, чтобы добавить задачу в своё рабочее пространство.</p>
+        </section>
+
+        <form>
+
+            <label for="title-task">Title</label>
+            <input id="title-task" name="title-task" type="text">
+
+            <label for="description-task">Description</label>
+            <textarea id="description-task" name="description-task"></textarea>
+
+            <label for="task-type">Task type</label>
+            <select id="task-type" name="task-type">
+                <option value="personal">Personal</option>
+                <option value="family">Family</option>
+            </select>
+
+            <label for="due-date-task">Due date</label>
+            <input id="due-date-task" name="due-date-task" type="date">
+
+            <button type="submit">Save task</button>
+        </form>
+    </main>
+
+    <footer>
+
+    </footer>
+</body>
+
+</html>
